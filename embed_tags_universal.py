@@ -7,7 +7,7 @@ import glob
 import numpy as np
 import uuid
 import shutil
-import unicodedata
+import platform
 import onnxruntime as ort
 from PIL import Image
 from huggingface_hub import hf_hub_download
@@ -18,8 +18,23 @@ try:
 except ImportError:
     tqdm = lambda x, **kwargs: x
 
-# --- 設定 ---
-EXIFTOOL_CMD = "exiftool"
+# --- OS判定と設定 ---
+SYSTEM_OS = platform.system()  # 'Windows' or 'Linux'
+IS_WINDOWS = (SYSTEM_OS == 'Windows')
+IS_LINUX = (SYSTEM_OS == 'Linux')
+
+# ExifToolコマンド設定
+if IS_WINDOWS:
+    # WindowsならカレントかPATHから
+    EXIFTOOL_CMD = "exiftool"
+    FS_ENCODING = 'cp932' 
+else:
+    # LinuxならPATHに入っている前提
+    EXIFTOOL_CMD = "exiftool"
+    FS_ENCODING = 'utf-8'
+
+# 履歴ファイル名
+HISTORY_FILE = "processed_history.txt"
 
 def preprocess(image, size=448):
     image = image.convert("RGB")
@@ -29,7 +44,7 @@ def preprocess(image, size=448):
     img_np = np.expand_dims(img_np, 0)
     return img_np
 
-def load_model_and_tags():
+def load_model_and_tags(use_gpu=False):
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     model_path = hf_hub_download(repo_id=repo_id, filename="model.onnx")
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
@@ -39,27 +54,61 @@ def load_model_and_tags():
         next(reader)
         tags = [row[1] for row in reader]
     
-    # AMD GPU (DirectML) 設定
-    providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+    # プロバイダ設定
+    providers = ['CPUExecutionProvider']
     
-    # ログがうるさいので少し黙らせるが、プロバイダ確認用に表示は残す
-    sess = ort.InferenceSession(model_path, providers=providers)
+    if use_gpu:
+        if IS_WINDOWS:
+            # Windows + GPU = DirectML
+            providers.insert(0, 'DmlExecutionProvider')
+            print(f"[INFO] GPU Mode: DirectML (Windows)")
+        elif IS_LINUX:
+            # Linux + GPU = ROCm
+            # ※ROCm環境が整っていないとエラーになる可能性があるが、その場合はCPUにフォールバックされることが多い
+            providers.insert(0, 'ROCMExecutionProvider')
+            print(f"[INFO] GPU Mode: ROCm (Linux)")
+    
+    # ログ抑制
+    sess_options = ort.SessionOptions()
+    sess_options.log_severity_level = 3
+    
+    try:
+        sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
+        print(f"[INFO] Active Providers: {sess.get_providers()}")
+    except Exception as e:
+        print(f"[WARN] Failed to load requested provider. Error: {e}")
+        print("[WARN] Falling back to CPU.")
+        sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
+
     return sess, tags
+
+def load_history():
+    processed = set()
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                processed.add(line.strip())
+    return processed
+
+def append_history(file_path):
+    try:
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(f"{file_path}\n")
+    except Exception:
+        pass
 
 def write_xmp_passthrough_safe(image_path, tags_list):
     if not tags_list:
-        return
+        return False
 
     tags_str = ", ".join(tags_list)
     abs_path = os.path.abspath(image_path)
     dir_name = os.path.dirname(abs_path)
     
-    # ★修正点：元のファイルの拡張子を取得する (.webp, .jpg, .png 等)
     _, ext = os.path.splitext(abs_path)
-    
-    # 一時ファイル名にも同じ拡張子を使う
     temp_name = f"temp_{uuid.uuid4().hex}{ext}"
     temp_path = os.path.join(dir_name, temp_name)
+    success = False
 
     try:
         os.rename(abs_path, temp_path)
@@ -78,37 +127,50 @@ def write_xmp_passthrough_safe(image_path, tags_list):
             cmd, 
             capture_output=True, 
             text=True, 
-            encoding='cp932',
+            encoding=FS_ENCODING,
             errors='ignore'
         )
         
         if result.returncode != 0:
             tqdm.write(f"ExifTool Error ({os.path.basename(image_path)}): {result.stderr.strip()}")
+        else:
+            success = True
 
     except OSError as e:
         tqdm.write(f"Rename Error: {e}")
-        return
+        return False
     except Exception as e:
         tqdm.write(f"Error: {e}")
+        return False
     finally:
         if os.path.exists(temp_path):
             try:
                 os.rename(temp_path, abs_path)
             except OSError:
                 tqdm.write(f"CRITICAL: Failed to restore {temp_path}")
+                success = False
+    
+    return success
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Auto-tagging for AMD GPU (DirectML) - Multi-format support.",
+        description="Auto-tagging Universal (ROCm/DirectML supported).",
         formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("images", nargs='*', help="List of image paths (wildcards supported).")
+    parser.add_argument("images", nargs='*', help="List of image paths.")
     parser.add_argument("--thresh", type=float, default=0.35, help="Confidence threshold")
+    parser.add_argument("--gpu", action="store_true", help="Enable GPU (DirectML on Win, ROCm on Linux)")
+    parser.add_argument("--resume", action="store_true", help="Skip files listed in history")
     args = parser.parse_args()
 
     if not args.images:
         parser.print_help()
         sys.exit(0)
+
+    processed_files = set()
+    if args.resume:
+        processed_files = load_history()
+        print(f"[INFO] Resuming... {len(processed_files)} processed files loaded.")
 
     target_files = []
     for path_str in args.images:
@@ -119,17 +181,24 @@ def main():
             target_files.append(path_str)
 
     target_files = sorted(list(set(target_files)))
+    
+    if args.resume:
+        before_count = len(target_files)
+        target_files = [f for f in target_files if f not in processed_files]
+        skipped_count = before_count - len(target_files)
+        if skipped_count > 0:
+            print(f"[INFO] Skipped {skipped_count} files.")
+
     if not target_files:
-        print("No files found.")
+        print("No new files found.")
         return
 
-    print("Loading model with DirectML... (Please wait)")
+    print("Loading model...")
     try:
-        sess, tags = load_model_and_tags()
-        print(f"Active Providers: {sess.get_providers()}") # 確認用
+        # --gpu フラグがついていればGPUモードを試行
+        sess, tags = load_model_and_tags(use_gpu=args.gpu)
     except Exception as e:
-        print(f"\n[Error] Failed to load model. Do you have 'onnxruntime-directml' installed?")
-        print(f"Error details: {e}")
+        print(f"\n[Error] Model load failed: {e}")
         sys.exit(1)
 
     input_name = sess.get_inputs()[0].name
@@ -151,8 +220,12 @@ def main():
                 if p > args.thresh:
                     detected_tags.append(tags[i])
             
+            # タグ書き込み
             if detected_tags:
-                write_xmp_passthrough_safe(img_path, detected_tags)
+                if write_xmp_passthrough_safe(img_path, detected_tags):
+                    if args.resume: append_history(img_path)
+            else:
+                if args.resume: append_history(img_path)
 
         except KeyboardInterrupt:
             print("\nAborted.")
