@@ -39,11 +39,10 @@ def load_model_and_tags():
         next(reader)
         tags = [row[1] for row in reader]
     
-    # ★ここが変更点：DirectMLを優先的に使用する★
-    # AMD GPU (Windows) を使うための設定
+    # AMD GPU (DirectML) 設定
     providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
     
-    print(f"Active Providers: {providers}")
+    # ログがうるさいので少し黙らせるが、プロバイダ確認用に表示は残す
     sess = ort.InferenceSession(model_path, providers=providers)
     return sess, tags
 
@@ -55,7 +54,11 @@ def write_xmp_passthrough_safe(image_path, tags_list):
     abs_path = os.path.abspath(image_path)
     dir_name = os.path.dirname(abs_path)
     
-    temp_name = f"temp_{uuid.uuid4().hex}.webp"
+    # ★修正点：元のファイルの拡張子を取得する (.webp, .jpg, .png 等)
+    _, ext = os.path.splitext(abs_path)
+    
+    # 一時ファイル名にも同じ拡張子を使う
+    temp_name = f"temp_{uuid.uuid4().hex}{ext}"
     temp_path = os.path.join(dir_name, temp_name)
 
     try:
@@ -96,7 +99,7 @@ def write_xmp_passthrough_safe(image_path, tags_list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Auto-tagging for AMD GPU (DirectML).",
+        description="Auto-tagging for AMD GPU (DirectML) - Multi-format support.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("images", nargs='*', help="List of image paths (wildcards supported).")
@@ -123,6 +126,7 @@ def main():
     print("Loading model with DirectML... (Please wait)")
     try:
         sess, tags = load_model_and_tags()
+        print(f"Active Providers: {sess.get_providers()}") # 確認用
     except Exception as e:
         print(f"\n[Error] Failed to load model. Do you have 'onnxruntime-directml' installed?")
         print(f"Error details: {e}")
