@@ -12,7 +12,7 @@ import onnxruntime as ort
 from PIL import Image
 from huggingface_hub import hf_hub_download
 
-# 進捗バー用ライブラリ (なければそのまま動くようにする)
+# 進捗バー用
 try:
     from tqdm import tqdm
 except ImportError:
@@ -38,7 +38,13 @@ def load_model_and_tags():
         reader = csv.reader(f)
         next(reader)
         tags = [row[1] for row in reader]
-    sess = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+    
+    # ★ここが変更点：DirectMLを優先的に使用する★
+    # AMD GPU (Windows) を使うための設定
+    providers = ['DmlExecutionProvider', 'CPUExecutionProvider']
+    
+    print(f"Active Providers: {providers}")
+    sess = ort.InferenceSession(model_path, providers=providers)
     return sess, tags
 
 def write_xmp_passthrough_safe(image_path, tags_list):
@@ -49,7 +55,6 @@ def write_xmp_passthrough_safe(image_path, tags_list):
     abs_path = os.path.abspath(image_path)
     dir_name = os.path.dirname(abs_path)
     
-    # 一時ファイル名を作成
     temp_name = f"temp_{uuid.uuid4().hex}.webp"
     temp_path = os.path.join(dir_name, temp_name)
 
@@ -74,7 +79,6 @@ def write_xmp_passthrough_safe(image_path, tags_list):
             errors='ignore'
         )
         
-        # エラーがあれば表示するが、成功時は黙って進む（バーの邪魔になるため）
         if result.returncode != 0:
             tqdm.write(f"ExifTool Error ({os.path.basename(image_path)}): {result.stderr.strip()}")
 
@@ -92,7 +96,7 @@ def write_xmp_passthrough_safe(image_path, tags_list):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Auto-tagging with Progress Bar.",
+        description="Auto-tagging for AMD GPU (DirectML).",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("images", nargs='*', help="List of image paths (wildcards supported).")
@@ -116,15 +120,19 @@ def main():
         print("No files found.")
         return
 
-    print("Loading model... (Please wait)")
-    sess, tags = load_model_and_tags()
+    print("Loading model with DirectML... (Please wait)")
+    try:
+        sess, tags = load_model_and_tags()
+    except Exception as e:
+        print(f"\n[Error] Failed to load model. Do you have 'onnxruntime-directml' installed?")
+        print(f"Error details: {e}")
+        sys.exit(1)
+
     input_name = sess.get_inputs()[0].name
     label_name = sess.get_outputs()[0].name
 
     print(f"Start processing {len(target_files)} images...")
     
-    # ★ここが進捗バーの肝じゃ★
-    # tqdmでラップすることで、プログレスバーが表示される
     for img_path in tqdm(target_files, unit="img", ncols=80):
         if not os.path.exists(img_path) or not os.path.isfile(img_path):
             continue
