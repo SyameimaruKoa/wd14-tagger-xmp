@@ -1,33 +1,32 @@
-﻿<#
+<#
 .SYNOPSIS
-    イラスト分類AI(WD14 Tagger)の統合実行ツールじゃ。CPUとAMD GPUの両方に対応しておる。
-    
+    イラスト分類AI(WD14 Tagger) 統合実行ツール (Universal版)
+    Windows / Linux 対応。レジューム機能付き。
+
 .DESCRIPTION
-    Pythonの仮想環境を自動で構築し、タグ付けスクリプトを実行する。
-    CPU用とAMD用で仮想環境を分離し、ライブラリの競合を防いでおる。
+    Python仮想環境を自動構築し、画像をタグ付けする。
+    -Resume をつけると、前回処理したファイルをスキップする。
+    OSを自動判定し、WindowsならDirectML(AMD)、LinuxならCPU環境を構築する。
 
 .PARAMETER Path
-    処理対象のパス（ファイルまたはフォルダ）。ワイルドカード使用可。
-    デフォルトは "*.webp"。
+    対象ファイルパス。デフォルト "*.webp"。
 
 .PARAMETER Thresh
-    タグ付けの信頼度しきい値（0.0〜1.0）。デフォルトは 0.35。
+    しきい値。デフォルト 0.35。
 
 .PARAMETER Amd
-    [スイッチ] これを指定すると AMD GPU (DirectML) モードで動作する。
-    専用のスクリプト(embed_tags_amd.py)と専用の環境(venv_amd)が使用される。
+    [Windows専用] AMD GPU (DirectML) を使用する。Linuxでは無視される。
+
+.PARAMETER Resume
+    [New!] 履歴ファイル(processed_history.txt)を参照し、処理済みのファイルをスキップする。
 
 .EXAMPLE
-    .\run_tagger.ps1
-    CPUモードで実行する（デフォルト）。
+    .\run_tagger.ps1 -Resume
+    前回の続きから実行する。
 
 .EXAMPLE
-    .\run_tagger.ps1 -Amd
-    AMD GPUモードで実行する。
-
-.EXAMPLE
-    .\run_tagger.ps1 -Path "C:\Data\*.webp" -Thresh 0.5 -Amd
-    画像パスとしきい値を指定してAMDモードで実行。
+    .\run_tagger.ps1 -Amd -Resume
+    WindowsでAMDを使って、続きから実行する。
 #>
 
 [CmdletBinding()]
@@ -35,97 +34,71 @@ param (
     [string]$Path = "*.webp",
     [float]$Thresh = 0.35,
     [switch]$Amd,
+    [switch]$Resume,
     [switch]$Help
 )
 
-# ヘルプ表示関数
+# OS判定
+$IsWindows = $true
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+    if ($IsWindows -and $IsLinux) { $IsWindows = $false } # 変数スコープ等の都合
+    if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
+}
+
 function Show-Help {
-    Write-Host "==========================================" -ForegroundColor Cyan
-    Write-Host "  AIタグ付け 統合実行ツール (CPU / AMD)" -ForegroundColor Cyan
-    Write-Host "==========================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "概要:"
-    Write-Host "  WD14 Taggerを使って画像にタグ付けを行う。CPUとAMD GPUを切り替え可能じゃ。"
-    Write-Host ""
-    Write-Host "使い方:"
-    Write-Host "  .\run_tagger.ps1 [オプション]"
-    Write-Host ""
-    Write-Host "オプション:"
-    Write-Host "  -Path <文字列>   処理対象のファイルパス（ワイルドカード可）。"
-    Write-Host "                   デフォルト: *.webp"
-    Write-Host "  -Thresh <数値>   判定のしきい値 (0.0 - 1.0)。"
-    Write-Host "                   デフォルト: 0.35"
-    Write-Host "  -Amd             AMD GPU (DirectML) を使用するスイッチ。"
-    Write-Host "                   ※ これを付けると 'venv_amd' 環境と 'embed_tags_amd.py' を使う。"
-    Write-Host "  -h, --help       このヘルプを表示する。"
+    Write-Host "=== AI Tagging Tool (Universal) ===" -ForegroundColor Cyan
+    Write-Host "Usage: .\run_tagger.ps1 [-Path] [-Thresh] [-Amd] [-Resume]"
+    Write-Host "  -Resume : Skip already processed files."
+    Write-Host "  -Amd    : Use DirectML (Windows only)."
     Write-Host ""
 }
 
-# 引数チェック (-h / --help)
-# CmdletBindingを使った場合、標準の -Verbose 等も使えるようになるが、
-# 手動の -Help チェックも残しておく
-if ($Help -or ($args -contains '-h') -or ($args -contains '--help')) {
-    Show-Help
-    exit
-}
+if ($Help) { Show-Help; exit }
 
-# --- 設定の切り替えロジック ---
+# --- 設定 ---
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PythonScript = Join-Path $ScriptDir "embed_tags_universal.py"
 
-if ($Amd) {
-    # AMDモードの設定
-    $ModeName = "AMD GPU (DirectML)"
-    $PythonScript = Join-Path $ScriptDir "embed_tags_amd.py"
+# OSによる仮想環境名の切り替え
+# Windows+AMDなら 'venv_amd'、それ以外(Linux含む)は 'venv_std' とする
+if ($IsWindows -and $Amd) {
     $VenvDir = Join-Path $ScriptDir "venv_amd"
     $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
 } else {
-    # CPUモードの設定
-    $ModeName = "CPU (Standard)"
-    $PythonScript = Join-Path $ScriptDir "embed_tags.py"
-    $VenvDir = Join-Path $ScriptDir "venv"
+    $VenvDir = Join-Path $ScriptDir "venv_std"
     $Requirements = @("onnxruntime", "pillow", "huggingface_hub", "numpy", "tqdm")
+    if ($Amd) { Write-Host "[WARN] Linux detected. AMD(DirectML) is disabled. Using CPU mode." -ForegroundColor Yellow }
 }
 
-# --- メイン処理 ---
-Write-Host "[INFO] モード: $ModeName で開始するぞ..." -ForegroundColor Green
+# --- 実行開始 ---
+Write-Host "[INFO] OS: $(if($IsWindows){'Windows'}else{'Linux'}) / Mode: $(if($Amd -and $IsWindows){'AMD'}else{'CPU'})" -ForegroundColor Green
 
-# 1. スクリプトの存在確認
+# 1. Pythonスクリプト確認
 if (-not (Test-Path $PythonScript)) {
-    Write-Host "[ERROR] スクリプト '$PythonScript' が見つからぬ！" -ForegroundColor Red
-    if ($Amd) {
-        Write-Host "        AMDモードゆえ 'embed_tags_amd.py' が必要じゃ。"
-    } else {
-        Write-Host "        通常モードゆえ 'embed_tags.py' が必要じゃ。"
-    }
+    Write-Host "[ERROR] '$PythonScript' not found." -ForegroundColor Red
     exit 1
 }
 
-# 2. 仮想環境(venv)の確認と作成
+# 2. venv作成
 if (-not (Test-Path $VenvDir)) {
-    Write-Host "[INFO] 仮想環境フォルダ($($VenvDir | Split-Path -Leaf))を作成中..." -ForegroundColor Yellow
-    try {
-        python -m venv $VenvDir
-    } catch {
-        Write-Host "[ERROR] venvの作成に失敗した。Pythonのパスは通っておるか？" -ForegroundColor Red
-        exit 1
-    }
+    Write-Host "[INFO] Creating venv at $VenvDir ..." -ForegroundColor Yellow
+    if ($IsWindows) { python -m venv $VenvDir } else { python3 -m venv $VenvDir }
+    if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] Failed to create venv." -ForegroundColor Red; exit 1 }
 }
 
-# 3. 仮想環境の有効化とライブラリインストール
-$ActivateScript = Join-Path $VenvDir "Scripts\Activate.ps1"
-if (-not (Test-Path $ActivateScript)) {
-    Write-Host "[ERROR] 仮想環境が壊れているようじゃ。フォルダ($VenvDir)を削除してやり直せ。" -ForegroundColor Red
-    exit 1
+# 3. パス解決 (Win/LinuxでScriptsかbinか違う)
+if ($IsWindows) {
+    $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+    $VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
+} else {
+    $VenvPython = Join-Path $VenvDir "bin/python"
+    $VenvPip = Join-Path $VenvDir "bin/pip"
 }
 
-$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-$VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
-
-# ライブラリ簡易チェック
+# 4. ライブラリ確認
 $PipCheck = & $VenvPip list
 $NeedInstall = $false
-
-if ($Amd) {
+if ($IsWindows -and $Amd) {
     if ($PipCheck -notmatch "onnxruntime-directml") { $NeedInstall = $true }
 } else {
     if ($PipCheck -notmatch "onnxruntime") { $NeedInstall = $true }
@@ -133,31 +106,28 @@ if ($Amd) {
 if ($PipCheck -notmatch "tqdm") { $NeedInstall = $true }
 
 if ($NeedInstall) {
-    Write-Host "[INFO] 必要なライブラリをインストール中... ($ModeName 用)" -ForegroundColor Yellow
+    Write-Host "[INFO] Installing requirements..." -ForegroundColor Yellow
     & $VenvPip install $Requirements | Out-Null
 }
 
-# 4. ExifToolの存在確認
+# 5. ExifTool確認
 if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
-    $LocalExifTool = Join-Path $ScriptDir "exiftool.exe"
-    if (-not (Test-Path $LocalExifTool)) {
-        Write-Host "[WARN] 'exiftool' が見つからぬ！ PATHに通すか、このフォルダに置くのじゃ。" -ForegroundColor Magenta
+    if ($IsWindows) {
+        $LocalExifTool = Join-Path $ScriptDir "exiftool.exe"
+        if (-not (Test-Path $LocalExifTool)) {
+            Write-Host "[WARN] 'exiftool.exe' not found in folder or PATH!" -ForegroundColor Magenta
+        }
+    } else {
+        Write-Host "[WARN] 'exiftool' command not found! Run: sudo apt install libimage-exiftool-perl" -ForegroundColor Magenta
     }
 }
 
-# 5. Pythonスクリプトの実行
-Write-Host "[INFO] 実行開始じゃ！" -ForegroundColor Green
-Write-Host "       対象: $Path"
-Write-Host "       環境: $($VenvDir | Split-Path -Leaf)"
-Write-Host ""
+# 6. 実行
+Write-Host "[INFO] Running Tagger..." -ForegroundColor Green
+$PyArgs = @($PythonScript, $Path, "--thresh", $Thresh)
+if ($IsWindows -and $Amd) { $PyArgs += "--amd" }
+if ($Resume) { $PyArgs += "--resume" }
 
-# 実行
-& $VenvPython $PythonScript $Path --thresh $Thresh
+& $VenvPython @PyArgs
 
-Write-Host ""
-Write-Host "[INFO] 完了じゃ。" -ForegroundColor Green
-
-# 終了待機 (ヘルプ表示時は上でexitしているので、ここに到達するのは実行後のみ)
-if ($Host.Name -eq "ConsoleHost") {
-    Read-Host "Enterキーを押して終了せよ"
-}
+Write-Host "[INFO] Done." -ForegroundColor Green
