@@ -1,32 +1,34 @@
 <#
 .SYNOPSIS
     イラスト分類AI(WD14 Tagger) 統合実行ツール (Universal版)
-    Windows / Linux 対応。レジューム機能付き。
+    Windows / Linux 対応。再帰スキャン対応。
+    デフォルトで「タグ付きファイル」はスキップ(レジューム)します。
 
 .DESCRIPTION
     Python仮想環境を自動構築し、画像をタグ付けする。
-    -Resume をつけると、前回処理したファイルをスキップする。
-    OSを自動判定し、WindowsならDirectML(AMD)、LinuxならCPU環境を構築する。
+    ファイルに既にタグがある場合はスキップします。
+    すべて再解析したい場合は -Force を付けてください。
 
 .PARAMETER Path
-    対象ファイルパス。デフォルト "*.webp"。
+    対象ファイルパス。フォルダを指定すると再帰的に処理します。
+    デフォルト "*.webp"。
 
 .PARAMETER Thresh
     しきい値。デフォルト 0.35。
 
 .PARAMETER Amd
-    [Windows専用] AMD GPU (DirectML) を使用する。Linuxでは無視される。
+    [Windows専用] AMD GPU (DirectML) を使用する。
 
-.PARAMETER Resume
-    [New!] 履歴ファイル(processed_history.txt)を参照し、処理済みのファイルをスキップする。
-
-.EXAMPLE
-    .\run_tagger.ps1 -Resume
-    前回の続きから実行する。
+.PARAMETER Force
+    [New!] 既にタグが付いているファイルも強制的に再解析・上書きします。
 
 .EXAMPLE
-    .\run_tagger.ps1 -Amd -Resume
-    WindowsでAMDを使って、続きから実行する。
+    .\run_tagger.ps1
+    現在のフォルダを処理（タグ付きはスキップ）。
+
+.EXAMPLE
+    .\run_tagger.ps1 -Path "C:\Images" -Amd -Force
+    指定フォルダをAMD GPUで処理し、全ファイルを強制上書きする。
 #>
 
 [CmdletBinding()]
@@ -34,21 +36,22 @@ param (
     [string]$Path = "*.webp",
     [float]$Thresh = 0.35,
     [switch]$Amd,
-    [switch]$Resume,
+    [switch]$Force,
     [switch]$Help
 )
 
 # OS判定
 $IsWindows = $true
 if ($PSVersionTable.PSVersion.Major -ge 6) {
-    if ($IsWindows -and $IsLinux) { $IsWindows = $false } # 変数スコープ等の都合
+    if ($IsWindows -and $IsLinux) { $IsWindows = $false }
     if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
 }
 
 function Show-Help {
     Write-Host "=== AI Tagging Tool (Universal) ===" -ForegroundColor Cyan
-    Write-Host "Usage: .\run_tagger.ps1 [-Path] [-Thresh] [-Amd] [-Resume]"
-    Write-Host "  -Resume : Skip already processed files."
+    Write-Host "Usage: .\run_tagger.ps1 [-Path] [-Thresh] [-Amd] [-Force]"
+    Write-Host "  Default behavior is RESUME (skip tagged files)."
+    Write-Host "  -Force  : Force re-process all files."
     Write-Host "  -Amd    : Use DirectML (Windows only)."
     Write-Host ""
 }
@@ -125,11 +128,12 @@ if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
 Write-Host "[INFO] Running Tagger..." -ForegroundColor Green
 $PyArgs = @($PythonScript, $Path, "--thresh", $Thresh)
 
-# ★ここを修正したぞ！ (--amd ではなく --gpu を渡す)
 if ($IsWindows -and $Amd) { $PyArgs += "--gpu" }
-
-if ($Resume) { $PyArgs += "--resume" }
+if ($Force) { $PyArgs += "--force" }
 
 & $VenvPython @PyArgs
 
 Write-Host "[INFO] Done." -ForegroundColor Green
+if ($Host.Name -eq "ConsoleHost") {
+    Read-Host "Enter to exit"
+}

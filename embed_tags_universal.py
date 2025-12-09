@@ -30,7 +30,6 @@ else:
     EXIFTOOL_CMD = "exiftool"
     FS_ENCODING = 'utf-8'
 
-HISTORY_FILE = "processed_history.txt"
 # 対象とする拡張子 (小文字)
 VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 
@@ -72,20 +71,37 @@ def load_model_and_tags(use_gpu=False):
 
     return sess, tags
 
-def load_history():
-    processed = set()
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                processed.add(line.strip())
-    return processed
-
-def append_history(file_path):
+def has_xmp_tags(image_path):
+    """
+    ExifToolを使ってXMPタグ(Subject)が既に存在するか確認する。
+    戻り値: True (タグあり), False (タグなし)
+    """
     try:
-        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{file_path}\n")
+        # -s3: 値のみ出力, -fast: 高速読み込み
+        cmd = [EXIFTOOL_CMD, "-XMP:Subject", "-s3", "-fast", image_path]
+        
+        # Windowsでのウィンドウポップアップ抑止など
+        startupinfo = None
+        if IS_WINDOWS:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            encoding=FS_ENCODING, 
+            errors='ignore',
+            startupinfo=startupinfo
+        )
+        
+        # 出力があればタグが存在する
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+        return False
+        
     except Exception:
-        pass
+        return False
 
 def write_xmp_passthrough_safe(image_path, tags_list):
     if not tags_list: return False
@@ -103,7 +119,20 @@ def write_xmp_passthrough_safe(image_path, tags_list):
             EXIFTOOL_CMD, "-overwrite_original", "-P", "-m", "-sep", ", ", 
             f"-XMP:Subject={tags_str}", temp_path 
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, encoding=FS_ENCODING, errors='ignore')
+        
+        startupinfo = None
+        if IS_WINDOWS:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            encoding=FS_ENCODING, 
+            errors='ignore',
+            startupinfo=startupinfo
+        )
         
         if result.returncode != 0:
             tqdm.write(f"ExifTool Error ({os.path.basename(image_path)}): {result.stderr.strip()}")
@@ -124,11 +153,9 @@ def write_xmp_passthrough_safe(image_path, tags_list):
                 success = False
     return success
 
-# ★ここが改良点：ディレクトリなら潜って探す関数
 def collect_images(path_args):
     collected = []
     for p in path_args:
-        # ワイルドカード文字列が含まれる場合は glob で展開
         if '*' in p or '?' in p:
             candidates = glob.glob(p, recursive=True)
         else:
@@ -136,43 +163,32 @@ def collect_images(path_args):
 
         for candidate in candidates:
             if os.path.isdir(candidate):
-                # ディレクトリなら再帰探索
                 print(f"[INFO] Scanning directory: {candidate}")
                 for root, _, files in os.walk(candidate):
                     for f in files:
                         if f.lower().endswith(VALID_EXTS):
                             collected.append(os.path.join(root, f))
             elif os.path.isfile(candidate):
-                # ファイルなら拡張子チェックして追加
                 if candidate.lower().endswith(VALID_EXTS):
                     collected.append(candidate)
     
     return sorted(list(set(collected)))
 
 def main():
-    parser = argparse.ArgumentParser(description="Auto-tagging Universal (Recursive).")
+    parser = argparse.ArgumentParser(description="Auto-tagging Universal (Check Tags & Recursive).")
     parser.add_argument("images", nargs='*', help="List of image paths or directories.")
     parser.add_argument("--thresh", type=float, default=0.35)
     parser.add_argument("--gpu", action="store_true")
-    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--force", action="store_true", help="Force overwrite even if tags exist")
     args = parser.parse_args()
 
     if not args.images:
         parser.print_help()
         sys.exit(0)
 
-    # 画像収集ロジックを強化版に変更
+    # 画像収集
     target_files = collect_images(args.images)
     
-    processed_files = set()
-    if args.resume:
-        processed_files = load_history()
-        before_count = len(target_files)
-        target_files = [f for f in target_files if f not in processed_files]
-        skipped_count = before_count - len(target_files)
-        if skipped_count > 0:
-            print(f"[INFO] Resuming... Skipped {skipped_count} processed files.")
-
     if not target_files:
         print("No files found to process.")
         return
@@ -189,8 +205,25 @@ def main():
 
     print(f"Start processing {len(target_files)} images...")
     
-    for img_path in tqdm(target_files, unit="img", ncols=80):
+    # スキップカウンター
+    skipped_count = 0
+    processed_count = 0
+
+    # 進捗バーの設定
+    pbar = tqdm(target_files, unit="img", ncols=80)
+    
+    for img_path in pbar:
         try:
+            # --- タグチェック処理 (レジューム判定) ---
+            if not args.force:
+                # 強制モードでなければ、タグがあるかチェック
+                if has_xmp_tags(img_path):
+                    skipped_count += 1
+                    # 進捗バーの表示を更新してスキップ
+                    # pbar.set_description(f"Skip: {os.path.basename(img_path)[:15]}...")
+                    continue
+            
+            # --- ここからAI解析 ---
             pil_image = Image.open(img_path)
             img_input = preprocess(pil_image)
             probs = sess.run([label_name], {input_name: img_input})[0][0]
@@ -200,17 +233,18 @@ def main():
                 if p > args.thresh:
                     detected_tags.append(tags[i])
             
+            # タグがあれば書き込み
             if detected_tags:
                 if write_xmp_passthrough_safe(img_path, detected_tags):
-                    if args.resume: append_history(img_path)
-            else:
-                if args.resume: append_history(img_path)
-
+                    processed_count += 1
+            
         except KeyboardInterrupt:
             print("\nAborted.")
             sys.exit(0)
         except Exception as e:
             tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
+    
+    print(f"\n[Done] Processed: {processed_count}, Skipped (Already Tagged): {skipped_count}")
 
 if __name__ == "__main__":
     main()
