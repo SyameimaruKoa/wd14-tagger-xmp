@@ -60,7 +60,6 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "embed_tags_universal.py"
 
 # OSによる仮想環境名の切り替え
-# Windows+AMDなら 'venv_amd'、それ以外(Linux含む)は 'venv_std' とする
 if ($IsWindows -and $Amd) {
     $VenvDir = Join-Path $ScriptDir "venv_amd"
     $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
@@ -86,7 +85,7 @@ if (-not (Test-Path $VenvDir)) {
     if ($LASTEXITCODE -ne 0) { Write-Host "[ERROR] Failed to create venv." -ForegroundColor Red; exit 1 }
 }
 
-# 3. パス解決 (Win/LinuxでScriptsかbinか違う)
+# 3. パス解決
 if ($IsWindows) {
     $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
     $VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
@@ -125,7 +124,10 @@ if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
 # 6. 実行
 Write-Host "[INFO] Running Tagger..." -ForegroundColor Green
 $PyArgs = @($PythonScript, $Path, "--thresh", $Thresh)
-if ($IsWindows -and $Amd) { $PyArgs += "--amd" }
+
+# ★ここを修正したぞ！ (--amd ではなく --gpu を渡す)
+if ($IsWindows -and $Amd) { $PyArgs += "--gpu" }
+
 if ($Resume) { $PyArgs += "--resume" }
 
 & $VenvPython @PyArgs
