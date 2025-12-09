@@ -19,22 +19,20 @@ except ImportError:
     tqdm = lambda x, **kwargs: x
 
 # --- OS判定と設定 ---
-SYSTEM_OS = platform.system()  # 'Windows' or 'Linux'
+SYSTEM_OS = platform.system()
 IS_WINDOWS = (SYSTEM_OS == 'Windows')
 IS_LINUX = (SYSTEM_OS == 'Linux')
 
-# ExifToolコマンド設定
 if IS_WINDOWS:
-    # WindowsならカレントかPATHから
     EXIFTOOL_CMD = "exiftool"
     FS_ENCODING = 'cp932' 
 else:
-    # LinuxならPATHに入っている前提
     EXIFTOOL_CMD = "exiftool"
     FS_ENCODING = 'utf-8'
 
-# 履歴ファイル名
 HISTORY_FILE = "processed_history.txt"
+# 対象とする拡張子 (小文字)
+VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 
 def preprocess(image, size=448):
     image = image.convert("RGB")
@@ -54,30 +52,22 @@ def load_model_and_tags(use_gpu=False):
         next(reader)
         tags = [row[1] for row in reader]
     
-    # プロバイダ設定
     providers = ['CPUExecutionProvider']
-    
     if use_gpu:
         if IS_WINDOWS:
-            # Windows + GPU = DirectML
             providers.insert(0, 'DmlExecutionProvider')
             print(f"[INFO] GPU Mode: DirectML (Windows)")
         elif IS_LINUX:
-            # Linux + GPU = ROCm
-            # ※ROCm環境が整っていないとエラーになる可能性があるが、その場合はCPUにフォールバックされることが多い
             providers.insert(0, 'ROCMExecutionProvider')
             print(f"[INFO] GPU Mode: ROCm (Linux)")
     
-    # ログ抑制
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 3
     
     try:
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
-        print(f"[INFO] Active Providers: {sess.get_providers()}")
     except Exception as e:
-        print(f"[WARN] Failed to load requested provider. Error: {e}")
-        print("[WARN] Falling back to CPU.")
+        print(f"[WARN] Failed to load GPU provider. Fallback to CPU. Error: {e}")
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
 
     return sess, tags
@@ -98,13 +88,10 @@ def append_history(file_path):
         pass
 
 def write_xmp_passthrough_safe(image_path, tags_list):
-    if not tags_list:
-        return False
-
+    if not tags_list: return False
     tags_str = ", ".join(tags_list)
     abs_path = os.path.abspath(image_path)
     dir_name = os.path.dirname(abs_path)
-    
     _, ext = os.path.splitext(abs_path)
     temp_name = f"temp_{uuid.uuid4().hex}{ext}"
     temp_path = os.path.join(dir_name, temp_name)
@@ -112,30 +99,16 @@ def write_xmp_passthrough_safe(image_path, tags_list):
 
     try:
         os.rename(abs_path, temp_path)
-        
         cmd = [
-            EXIFTOOL_CMD,
-            "-overwrite_original",
-            "-P",
-            "-m",
-            "-sep", ", ", 
-            f"-XMP:Subject={tags_str}",
-            temp_path 
+            EXIFTOOL_CMD, "-overwrite_original", "-P", "-m", "-sep", ", ", 
+            f"-XMP:Subject={tags_str}", temp_path 
         ]
-
-        result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            encoding=FS_ENCODING,
-            errors='ignore'
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding=FS_ENCODING, errors='ignore')
         
         if result.returncode != 0:
             tqdm.write(f"ExifTool Error ({os.path.basename(image_path)}): {result.stderr.strip()}")
         else:
             success = True
-
     except OSError as e:
         tqdm.write(f"Rename Error: {e}")
         return False
@@ -149,56 +122,66 @@ def write_xmp_passthrough_safe(image_path, tags_list):
             except OSError:
                 tqdm.write(f"CRITICAL: Failed to restore {temp_path}")
                 success = False
-    
     return success
 
+# ★ここが改良点：ディレクトリなら潜って探す関数
+def collect_images(path_args):
+    collected = []
+    for p in path_args:
+        # ワイルドカード文字列が含まれる場合は glob で展開
+        if '*' in p or '?' in p:
+            candidates = glob.glob(p, recursive=True)
+        else:
+            candidates = [p]
+
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                # ディレクトリなら再帰探索
+                print(f"[INFO] Scanning directory: {candidate}")
+                for root, _, files in os.walk(candidate):
+                    for f in files:
+                        if f.lower().endswith(VALID_EXTS):
+                            collected.append(os.path.join(root, f))
+            elif os.path.isfile(candidate):
+                # ファイルなら拡張子チェックして追加
+                if candidate.lower().endswith(VALID_EXTS):
+                    collected.append(candidate)
+    
+    return sorted(list(set(collected)))
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Auto-tagging Universal (ROCm/DirectML supported).",
-        formatter_class=argparse.RawTextHelpFormatter
-    )
-    parser.add_argument("images", nargs='*', help="List of image paths.")
-    parser.add_argument("--thresh", type=float, default=0.35, help="Confidence threshold")
-    parser.add_argument("--gpu", action="store_true", help="Enable GPU (DirectML on Win, ROCm on Linux)")
-    parser.add_argument("--resume", action="store_true", help="Skip files listed in history")
+    parser = argparse.ArgumentParser(description="Auto-tagging Universal (Recursive).")
+    parser.add_argument("images", nargs='*', help="List of image paths or directories.")
+    parser.add_argument("--thresh", type=float, default=0.35)
+    parser.add_argument("--gpu", action="store_true")
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
 
     if not args.images:
         parser.print_help()
         sys.exit(0)
 
+    # 画像収集ロジックを強化版に変更
+    target_files = collect_images(args.images)
+    
     processed_files = set()
     if args.resume:
         processed_files = load_history()
-        print(f"[INFO] Resuming... {len(processed_files)} processed files loaded.")
-
-    target_files = []
-    for path_str in args.images:
-        expanded = glob.glob(path_str)
-        if expanded:
-            target_files.extend(expanded)
-        else:
-            target_files.append(path_str)
-
-    target_files = sorted(list(set(target_files)))
-    
-    if args.resume:
         before_count = len(target_files)
         target_files = [f for f in target_files if f not in processed_files]
         skipped_count = before_count - len(target_files)
         if skipped_count > 0:
-            print(f"[INFO] Skipped {skipped_count} files.")
+            print(f"[INFO] Resuming... Skipped {skipped_count} processed files.")
 
     if not target_files:
-        print("No new files found.")
+        print("No files found to process.")
         return
 
     print("Loading model...")
     try:
-        # --gpu フラグがついていればGPUモードを試行
         sess, tags = load_model_and_tags(use_gpu=args.gpu)
     except Exception as e:
-        print(f"\n[Error] Model load failed: {e}")
+        print(f"[Error] Model load failed: {e}")
         sys.exit(1)
 
     input_name = sess.get_inputs()[0].name
@@ -207,9 +190,6 @@ def main():
     print(f"Start processing {len(target_files)} images...")
     
     for img_path in tqdm(target_files, unit="img", ncols=80):
-        if not os.path.exists(img_path) or not os.path.isfile(img_path):
-            continue
-        
         try:
             pil_image = Image.open(img_path)
             img_input = preprocess(pil_image)
@@ -220,7 +200,6 @@ def main():
                 if p > args.thresh:
                     detected_tags.append(tags[i])
             
-            # タグ書き込み
             if detected_tags:
                 if write_xmp_passthrough_safe(img_path, detected_tags):
                     if args.resume: append_history(img_path)
