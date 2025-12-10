@@ -14,8 +14,6 @@ import socket
 import onnxruntime as ort
 from PIL import Image
 from huggingface_hub import hf_hub_download
-
-# サーバー/クライアント用
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.request
 import urllib.error
@@ -41,6 +39,39 @@ else:
 HISTORY_FILE = "processed_history.txt"
 VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 
+# --- IPアドレス取得関数 ---
+def get_ip_addresses():
+    ips = []
+    # 1. 一般的なLAN IP (外部へ接続して確認)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 実際に接続はしないが、ルーティングを確認する
+        s.connect(("8.8.8.8", 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+        ips.append(f"LAN: {lan_ip}")
+    except Exception:
+        pass
+
+    # 2. LinuxならTailscaleや全インターフェースを確認
+    if IS_LINUX:
+        try:
+            # ip addr コマンドの結果から 100.x.y.z (Tailscale) を探す
+            cmd = ["ip", "-4", "addr", "show"]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            for line in res.stdout.split('\n'):
+                if "inet" in line and "100." in line:
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        ts_ip = parts[1].split('/')[0]
+                        # Tailscaleの範囲(CGNAT)か簡易チェック
+                        if ts_ip.startswith("100."):
+                            ips.append(f"Tailscale: {ts_ip}")
+        except Exception:
+            pass
+    
+    return ips
+
 # --- モデル読み込み関数 ---
 def load_model_and_tags(use_gpu=False):
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
@@ -52,18 +83,16 @@ def load_model_and_tags(use_gpu=False):
         next(reader)
         tags = [row[1] for row in reader]
     
-    # プロバイダの優先順位設定
-    # 利用可能なものを自動で上から試行する
+    # プロバイダ設定
     providers = []
     if use_gpu:
         if IS_WINDOWS:
-            # Windows: DirectML(AMD/Intel), CUDA(NVIDIA), OpenVINO(Intel)
-            providers.extend(['DmlExecutionProvider', 'CUDAExecutionProvider', 'OpenVINOExecutionProvider'])
+            providers.extend(['DmlExecutionProvider', 'CUDAExecutionProvider'])
         elif IS_LINUX:
-            # Linux: ROCm(AMD), CUDA(NVIDIA), OpenVINO(Intel)
-            providers.extend(['ROCMExecutionProvider', 'CUDAExecutionProvider', 'OpenVINOExecutionProvider'])
+            # Linuxの場合、シェルスクリプト側で適切なライブラリパスが設定されていることを期待
+            # NVIDIA環境ならCUDA、AMD環境ならROCmがヒットするよう並べる
+            providers.extend(['CUDAExecutionProvider', 'ROCMExecutionProvider'])
     
-    # 最後に必ずCPUを入れる
     providers.append('CPUExecutionProvider')
     
     sess_options = ort.SessionOptions()
@@ -74,7 +103,7 @@ def load_model_and_tags(use_gpu=False):
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
         print(f"[INFO] Active Providers: {sess.get_providers()}")
     except Exception as e:
-        print(f"[WARN] Failed to load requested provider. Error: {e}")
+        print(f"[WARN] Failed to load GPU provider. Error: {e}")
         print("[INFO] Fallback to CPU.")
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
 
@@ -185,24 +214,15 @@ class TagServerHandler(BaseHTTPRequestHandler):
         try:
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
-            
-            # 画像処理
             img = Image.open(io.BytesIO(post_data))
             img_input = preprocess(img)
-            
-            # グローバルモデル使用
             probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
-            
             response_data = json.dumps(probs.astype(float).tolist())
-            
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(response_data.encode('utf-8'))
-            
-            # ログ表示 (進捗バーがないのでprintで良い)
             print(f"[Request] From {self.client_address[0]} - {content_length} bytes processed")
-
         except Exception as e:
             print(f"[Error] Processing request: {e}")
             self.send_response(500)
@@ -210,14 +230,16 @@ class TagServerHandler(BaseHTTPRequestHandler):
 
 def run_server(port, use_gpu):
     init_global_model(use_gpu)
-    server_address = ('0.0.0.0', port) # Tailscale含む全インターフェースで待機
+    server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, TagServerHandler)
     
-    # IP表示
-    hostname = socket.gethostname()
     print(f"\n[INFO] Server running on Port {port}")
-    print(f"[INFO] Hostname: {hostname}")
-    print(f"[INFO] Ready to accept requests from Tailscale/LAN.")
+    # IP表示
+    ips = get_ip_addresses()
+    for ip in ips:
+        print(f"[INFO] {ip}")
+    
+    print(f"[INFO] Ready to accept requests.")
     print(f"[INFO] Press Ctrl+C to stop.\n")
     
     try:
@@ -230,8 +252,6 @@ def run_client(target_files, host, port, thresh, force):
     url = f"http://{host}:{port}"
     print(f"[INFO] Connecting to Server: {url}")
     
-    # タグリスト取得（サーバーからではなくローカル定義を使用）
-    # ※サーバー・クライアント間でselected_tags.csvが一致している前提
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
     tags = []
@@ -250,32 +270,23 @@ def run_client(target_files, host, port, thresh, force):
                 if has_xmp_tags(img_path):
                     skipped_count += 1
                     continue
-
-            # ファイル読み込み
             with open(img_path, 'rb') as f:
                 img_data = f.read()
-
-            # 送信
             req = urllib.request.Request(url, data=img_data, method='POST')
             req.add_header('Content-Type', 'application/octet-stream')
-            
             with urllib.request.urlopen(req) as res:
                 if res.status != 200:
                     tqdm.write(f"Server Error: {res.status}")
                     continue
                 response_body = res.read()
                 probs = json.loads(response_body.decode('utf-8'))
-
-            # タグ判定
             detected_tags = []
             for i, p in enumerate(probs):
                 if p > thresh:
                     detected_tags.append(tags[i])
-            
             if detected_tags:
                 if write_xmp_passthrough_safe(img_path, detected_tags):
                     processed_count += 1
-        
         except urllib.error.URLError as e:
             tqdm.write(f"Connection Error: {e}")
             break
@@ -288,71 +299,52 @@ def run_client(target_files, host, port, thresh, force):
     print(f"\n[Done] Processed: {processed_count}, Skipped: {skipped_count}")
 
 
-# --- メイン処理 ---
 def main():
-    parser = argparse.ArgumentParser(description="WD14 Tagger Universal (Standalone / Server / Client)")
-    
-    # モード選択
-    parser.add_argument("--mode", choices=['standalone', 'server', 'client'], default='standalone', help="Operation mode")
-    
-    # 共通オプション
-    parser.add_argument("images", nargs='*', help="Images (Standalone/Client only)")
+    parser = argparse.ArgumentParser(description="WD14 Tagger Universal")
+    parser.add_argument("--mode", choices=['standalone', 'server', 'client'], default='standalone')
+    parser.add_argument("images", nargs='*')
     parser.add_argument("--thresh", type=float, default=0.35)
-    parser.add_argument("--gpu", action="store_true", help="Enable GPU (Standalone/Server only)")
-    parser.add_argument("--force", action="store_true", help="Overwrite existing tags (Standalone/Client only)")
-    
-    # サーバー・クライアント用オプション
-    parser.add_argument("--host", default="localhost", help="Server IP (Client mode)")
-    parser.add_argument("--port", type=int, default=5000, help="Server Port")
-    
+    parser.add_argument("--gpu", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--host", default="localhost")
+    parser.add_argument("--port", type=int, default=5000)
     args = parser.parse_args()
 
-    # モード別分岐
     if args.mode == 'server':
-        # サーバー起動 (画像引数は無視)
         run_server(args.port, args.gpu)
-
     elif args.mode == 'client':
         if not args.images:
             print("Error: No images specified for client mode.")
             return
         files = collect_images(args.images)
         run_client(files, args.host, args.port, args.thresh, args.force)
-
     else:
-        # Standalone (デフォルト)
+        # Standalone
         if not args.images:
             parser.print_help()
             return
-        
         files = collect_images(args.images)
         if not files:
             print("No files found.")
             return
-
         print("Loading model...")
         init_global_model(args.gpu)
-        
         processed = 0
         skipped = 0
         pbar = tqdm(files, unit="img", ncols=80)
-        
         for img_path in pbar:
             try:
                 if not args.force:
                     if has_xmp_tags(img_path):
                         skipped += 1
                         continue
-                
                 pil_image = Image.open(img_path)
                 img_input = preprocess(pil_image)
                 probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
-                
                 detected_tags = []
                 for i, p in enumerate(probs):
                     if p > args.thresh:
                         detected_tags.append(tags_global[i])
-                
                 if detected_tags:
                     if write_xmp_passthrough_safe(img_path, detected_tags):
                         processed += 1
@@ -360,7 +352,6 @@ def main():
                 sys.exit(0)
             except Exception as e:
                 tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
-        
         print(f"\n[Done] Processed: {processed}, Skipped: {skipped}")
 
 if __name__ == "__main__":
