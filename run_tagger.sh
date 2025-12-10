@@ -2,13 +2,12 @@
 
 # ==========================================
 # WD14 Tagger Universal (Bash Wrapper)
-# Auto-detects NVIDIA/AMD for Linux
+# Auto-fix for NVIDIA/AMD libraries
 # ==========================================
 
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 PYTHON_SCRIPT="$SCRIPT_DIR/embed_tags_universal.py"
 
-# デフォルト設定
 MODE="standalone"
 THRESH=0.35
 USE_GPU=0
@@ -21,18 +20,14 @@ show_help() {
     echo "Usage: ./run_tagger.sh [OPTIONS] [PATH...]"
     echo ""
     echo "Modes:"
-    echo "  (default)           Standalone mode"
     echo "  --server            Start GPU Server mode"
     echo "  --client            Start Client mode"
     echo ""
     echo "Options:"
+    echo "  -g, --gpu           Use GPU (Auto-detect)"
     echo "  -p, --path <path>   Target file/folder"
-    echo "  -t, --thresh <val>  Threshold (default: 0.35)"
-    echo "  -g, --gpu           Use GPU (Auto-detect CUDA/ROCm/DirectML)"
-    echo "  -f, --force         Force overwrite"
     echo "  -H, --host <ip>     Server IP"
-    echo "  -P, --port <val>    Server Port"
-    echo "  -h, --help          Show this help"
+    echo "  -h, --help          Show help"
     echo ""
 }
 
@@ -69,59 +64,59 @@ else
 fi
 
 if [ ! -d "$VENV_DIR" ]; then
-    echo "[INFO] Creating virtual environment at $VENV_DIR ..."
+    echo "[INFO] Creating virtual environment..."
     if ! python3 -m venv "$VENV_DIR"; then
-        echo "[ERROR] Failed to create venv. Try: sudo apt install python3-venv"
+        echo "[ERROR] 'python3-venv' is missing. Run: sudo apt install python3-venv"
         exit 1
     fi
 fi
 
-# 2. Activate
 source "$VENV_DIR/bin/activate"
-
-# 3. Requirements & GPU Logic
 PIP_CMD="$VENV_DIR/bin/pip"
 INSTALLED_PKGS=$($PIP_CMD list)
 NEEDS_INSTALL=0
 
 if [[ $INSTALLED_PKGS != *"tqdm"* ]]; then NEEDS_INSTALL=1; fi
-
-# GPUライブラリのチェック
 if [ $USE_GPU -eq 1 ]; then
-    # 既に何らかのGPU版が入っていればOKとする
-    if [[ $INSTALLED_PKGS != *"onnxruntime-gpu"* ]] && \
-       [[ $INSTALLED_PKGS != *"onnxruntime-rocm"* ]] && \
-       [[ $INSTALLED_PKGS != *"onnxruntime-openvino"* ]]; then
+    if [[ $INSTALLED_PKGS != *"onnxruntime-gpu"* ]] && [[ $INSTALLED_PKGS != *"onnxruntime-rocm"* ]]; then
         NEEDS_INSTALL=1
     fi
 else
     if [[ $INSTALLED_PKGS != *"onnxruntime"* ]]; then NEEDS_INSTALL=1; fi
 fi
 
+# 2. パッケージインストール
 if [ $NEEDS_INSTALL -eq 1 ]; then
     echo "[INFO] Installing requirements..."
     $PIP_CMD install --upgrade pip
     $PIP_CMD install pillow huggingface_hub numpy tqdm
 
     if [ $USE_GPU -eq 1 ]; then
-        # ★ここが改良点：GPUメーカー自動判別★
         if command -v nvidia-smi &> /dev/null; then
-            echo "[INFO] NVIDIA GPU detected. Installing 'onnxruntime-gpu' (CUDA)..."
+            echo "[INFO] NVIDIA GPU detected."
+            # ★ここがミソ：NVIDIAのライブラリもpipで入れる
             $PIP_CMD install onnxruntime-gpu
+            $PIP_CMD install nvidia-cudnn-cu12 nvidia-cublas-cu12
         elif command -v rocminfo &> /dev/null; then
-            echo "[INFO] AMD GPU detected. Installing 'onnxruntime-rocm'..."
+            echo "[INFO] AMD GPU detected."
             if ! $PIP_CMD install onnxruntime-rocm; then
-                 echo "[WARN] ROCm install failed. Fallback to standard onnxruntime."
                  $PIP_CMD install onnxruntime
             fi
         else
-            echo "[WARN] No specific GPU tool found (nvidia-smi/rocminfo missing)."
-            echo "[INFO] Installing standard 'onnxruntime-gpu' hoping for the best..."
+            echo "[WARN] No GPU tool detected. Installing onnxruntime-gpu anyway..."
             $PIP_CMD install onnxruntime-gpu
         fi
     else
         $PIP_CMD install onnxruntime
     fi
+fi
+
+# 3. LD_LIBRARY_PATHの自動補正 (NVIDIAの場合)
+# pipで入れた nvidia-* パッケージの中にあるライブラリにパスを通す
+if [ $USE_GPU -eq 1 ] && command -v nvidia-smi &> /dev/null; then
+    SITE_PACKAGES=$($VENV_DIR/bin/python3 -c "import site; print(site.getsitepackages()[0])")
+    # nvidia/cudnn/lib と nvidia/cublas/lib 等を探してパスに追加
+    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cudnn/lib:$SITE_PACKAGES/nvidia/cublas/lib"
 fi
 
 # 4. 実行
