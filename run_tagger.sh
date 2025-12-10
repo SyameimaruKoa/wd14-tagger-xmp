@@ -2,7 +2,7 @@
 
 # ==========================================
 # WD14 Tagger Universal (Bash Wrapper)
-# Auto-fix for NVIDIA/AMD libraries
+# Auto-fix for NVIDIA/AMD libraries (Complete)
 # ==========================================
 
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
@@ -81,6 +81,10 @@ if [ $USE_GPU -eq 1 ]; then
     if [[ $INSTALLED_PKGS != *"onnxruntime-gpu"* ]] && [[ $INSTALLED_PKGS != *"onnxruntime-rocm"* ]]; then
         NEEDS_INSTALL=1
     fi
+    # NVIDIAの場合、追加ライブラリが入っているかチェック
+    if command -v nvidia-smi &> /dev/null; then
+        if [[ $INSTALLED_PKGS != *"nvidia-curand-cu12"* ]]; then NEEDS_INSTALL=1; fi
+    fi
 else
     if [[ $INSTALLED_PKGS != *"onnxruntime"* ]]; then NEEDS_INSTALL=1; fi
 fi
@@ -94,9 +98,10 @@ if [ $NEEDS_INSTALL -eq 1 ]; then
     if [ $USE_GPU -eq 1 ]; then
         if command -v nvidia-smi &> /dev/null; then
             echo "[INFO] NVIDIA GPU detected."
-            # ★ここがミソ：NVIDIAのライブラリもpipで入れる
+            # ★修正点: 必要なNVIDIAライブラリを全て入れる (curand, cufft等)
             $PIP_CMD install onnxruntime-gpu
-            $PIP_CMD install nvidia-cudnn-cu12 nvidia-cublas-cu12
+            echo "[INFO] Installing NVIDIA CUDA libraries..."
+            $PIP_CMD install nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-curand-cu12 nvidia-cufft-cu12
         elif command -v rocminfo &> /dev/null; then
             echo "[INFO] AMD GPU detected."
             if ! $PIP_CMD install onnxruntime-rocm; then
@@ -112,11 +117,17 @@ if [ $NEEDS_INSTALL -eq 1 ]; then
 fi
 
 # 3. LD_LIBRARY_PATHの自動補正 (NVIDIAの場合)
-# pipで入れた nvidia-* パッケージの中にあるライブラリにパスを通す
+# pipで入れた nvidia-* パッケージのパスを全てLD_LIBRARY_PATHに追加する
 if [ $USE_GPU -eq 1 ] && command -v nvidia-smi &> /dev/null; then
     SITE_PACKAGES=$($VENV_DIR/bin/python3 -c "import site; print(site.getsitepackages()[0])")
-    # nvidia/cudnn/lib と nvidia/cublas/lib 等を探してパスに追加
-    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cudnn/lib:$SITE_PACKAGES/nvidia/cublas/lib"
+    
+    # nvidiaフォルダ以下の全てのライブラリパスを列挙して追加
+    for lib_dir in $SITE_PACKAGES/nvidia/*/lib; do
+        if [ -d "$lib_dir" ]; then
+            export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$lib_dir"
+        fi
+    done
+    # echo "[DEBUG] LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH"
 fi
 
 # 4. 実行
