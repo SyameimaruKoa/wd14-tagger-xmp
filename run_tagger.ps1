@@ -16,8 +16,8 @@
 .PARAMETER Client
     Start as Client mode.
 
-.PARAMETER Host
-    Server IP Address (for Client mode).
+.PARAMETER ServerAddr
+    Server IP Address (for Client mode). Renamed from HostIP to avoid conflict with Help.
 
 .PARAMETER Port
     Server Port (Default: 5000).
@@ -35,10 +35,11 @@ param (
     [float]$Thresh = 0.35,
     [switch]$Server,
     [switch]$Client,
-    [string]$HostIP = "localhost",
+    [string]$ServerAddr = "localhost",
     [int]$Port = 5000,
     [switch]$Gpu,
     [switch]$Force,
+    [Alias('h')] # ★これでもう迷わせない
     [switch]$Help
 )
 
@@ -47,7 +48,10 @@ function Show-Help {
     Write-Host "Usage:"
     Write-Host "  Standalone : .\run_tagger.ps1 -Path 'C:\Imgs' -Gpu"
     Write-Host "  Server     : .\run_tagger.ps1 -Server -Gpu"
-    Write-Host "  Client     : .\run_tagger.ps1 -Client -Path 'C:\Imgs' -Host '192.168.x.x'"
+    Write-Host "  Client     : .\run_tagger.ps1 -Client -Path 'C:\Imgs' -ServerAddr '192.168.x.x'"
+    Write-Host ""
+    Write-Host "Options:"
+    Write-Host "  -h, -Help  : Show this help"
     Write-Host ""
 }
 
@@ -63,8 +67,7 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
     if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
 }
 
-# 仮想環境設定 (AMD指定時のみDirectML版を入れる簡易ロジックは維持)
-# NVIDIA等はユーザーが手動で pip install onnxruntime-gpu してあることを期待する
+# 仮想環境設定
 if ($IsWindows -and $Gpu) {
     $VenvDir = Join-Path $ScriptDir "venv_gpu"
     $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
@@ -74,10 +77,13 @@ if ($IsWindows -and $Gpu) {
 }
 
 # --- 実行開始 ---
-Write-Host "[INFO] Mode Check..."
 $Mode = "standalone"
 if ($Server) { $Mode = "server" }
 if ($Client) { $Mode = "client" }
+
+if ($Mode -ne "server") {
+    Write-Host "[INFO] Mode: $Mode"
+}
 
 # 1. venv作成
 if (-not (Test-Path $VenvDir)) {
@@ -117,7 +123,7 @@ if ($Mode -eq "server") {
     if ($Gpu) { $PyArgs += "--gpu" }
 }
 elseif ($Mode -eq "client") {
-    $PyArgs += ($Path, "--host", $HostIP, "--port", $Port, "--thresh", $Thresh)
+    $PyArgs += ($Path, "--host", $ServerAddr, "--port", $Port, "--thresh", $Thresh)
     if ($Force) { $PyArgs += "--force" }
 }
 else {
