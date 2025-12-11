@@ -56,6 +56,19 @@ echo " Mode: $MODE"
 echo " GPU: $(if [ $USE_GPU -eq 1 ]; then echo 'ON'; else echo 'OFF'; fi)"
 echo "----------------------------------------"
 
+# 0. ExifToolチェック & 自動インストール (Linux)
+if [ "$(uname)" == "Linux" ]; then
+    if ! command -v exiftool &> /dev/null; then
+        echo "[INFO] ExifTool not found. Checking installation method..."
+        if command -v apt-get &> /dev/null; then
+            echo "[INFO] Installing libimage-exiftool-perl via apt..."
+            sudo apt-get update && sudo apt-get install -y libimage-exiftool-perl
+        else
+            echo "[WARN] Automatic installation not supported on this OS. Please install ExifTool manually."
+        fi
+    fi
+fi
+
 # 1. venv作成
 if [ $USE_GPU -eq 1 ]; then
     VENV_DIR="$SCRIPT_DIR/venv_gpu"
@@ -81,7 +94,7 @@ if [ $USE_GPU -eq 1 ]; then
     if [[ $INSTALLED_PKGS != *"onnxruntime-gpu"* ]] && [[ $INSTALLED_PKGS != *"onnxruntime-rocm"* ]]; then
         NEEDS_INSTALL=1
     fi
-    # NVIDIAチェック: cuda-runtimeが入っているか
+    # NVIDIAチェック
     if command -v nvidia-smi &> /dev/null; then
         if [[ $INSTALLED_PKGS != *"nvidia-cuda-runtime-cu12"* ]]; then NEEDS_INSTALL=1; fi
     fi
@@ -98,7 +111,6 @@ if [ $NEEDS_INSTALL -eq 1 ]; then
     if [ $USE_GPU -eq 1 ]; then
         if command -v nvidia-smi &> /dev/null; then
             echo "[INFO] NVIDIA GPU detected."
-            # ★修正点: nvidia-cuda-runtime-cu12 を追加！ これで libcudart.so.12 が入る
             $PIP_CMD install onnxruntime-gpu
             echo "[INFO] Installing NVIDIA CUDA libraries..."
             $PIP_CMD install nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cublas-cu12 nvidia-curand-cu12 nvidia-cufft-cu12
@@ -119,9 +131,6 @@ fi
 # 3. LD_LIBRARY_PATHの自動補正 (NVIDIAの場合)
 if [ $USE_GPU -eq 1 ] && command -v nvidia-smi &> /dev/null; then
     SITE_PACKAGES=$($VENV_DIR/bin/python3 -c "import site; print(site.getsitepackages()[0])")
-    
-    # nvidiaフォルダ以下の全てのライブラリパスを列挙して追加
-    # libcudart は nvidia/cuda_runtime/lib に入る
     for lib_dir in $SITE_PACKAGES/nvidia/*/lib; do
         if [ -d "$lib_dir" ]; then
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$lib_dir"
