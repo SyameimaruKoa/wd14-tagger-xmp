@@ -86,11 +86,13 @@ param (
     [switch]$IgnoreSensitive,
     [switch]$Server,
     [switch]$Client,
-    [string]$ServerAddr = "localhost",
-    [int]$Port = 5000,
+    [string]$ServerAddr,
+    [int]$Port,
     [switch]$Gpu,
     [switch]$Force,
     [switch]$Organize,
+    [switch]$Setup,
+    [switch]$All,
     [Alias('h')]
     [switch]$Help
 )
@@ -99,23 +101,24 @@ param (
 function Show-Help {
     Write-Host "=== WD14 Tagger Universal (日本語ヘルプ) ===" -ForegroundColor Cyan
     Write-Host "使い方:"
-    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize [-RatingThresh 0.5] [-IgnoreSensitive]"
+    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize"
+    Write-Host "  環境構築   : .\run_tagger.ps1 -Setup [-All] [-Gpu]"
     Write-Host "  サーバー   : .\run_tagger.ps1 -Server -Gpu"
-    Write-Host "  クライアント: .\run_tagger.ps1 -Client -Path 'フォルダパス' -ServerAddr '192.168.x.x'"
+    Write-Host "  クライアント: .\run_tagger.ps1 -Client -Path 'フォルダパス'"
     Write-Host ""
     Write-Host "オプション一覧:"
-    Write-Host "  -Path             : 処理する画像やフォルダのパス (既定: *.webp)"
-    Write-Host "  -Gpu              : GPUを使って高速化する"
-    Write-Host "  -Organize         : レーティング(general/sensitive等)別にフォルダ分けする"
-    Write-Host "  -Thresh           : タグ付けの確信度閾値 (既定: 0.35)"
-    Write-Host "  -RatingThresh     : センシティブ判定の閾値。これ以下の確信度はgeneral扱いにする (例: 0.5)"
-    Write-Host "  -IgnoreSensitive  : sensitive(R-15)をgeneral(全年齢)として扱う"
-    Write-Host "  -Force            : 既存タグがあっても強制的に上書き・再解析する"
-    Write-Host "  -Server           : サーバーモードで起動"
-    Write-Host "  -Client           : クライアントモードで起動"
-    Write-Host "  -ServerAddr       : 接続先サーバーのIPアドレス"
-    Write-Host "  -Port             : 通信ポート (既定: 5000)"
-    Write-Host "  -h, -Help         : このヘルプを表示する"
+    Write-Host "  -Path             : 処理対象パス (既定: *.webp)"
+    Write-Host "  -Gpu              : GPUを使用"
+    Write-Host "  -Organize         : フォルダ振り分けモード"
+    Write-Host "  -Setup            : 環境構築のみ実行"
+    Write-Host "  -All              : Setup時に全環境(CPU/GPU)を作成"
+    Write-Host "  -Thresh           : タグ確信度閾値 (0.35)"
+    Write-Host "  -RatingThresh     : センシティブ判定閾値 (例: 0.5)"
+    Write-Host "  -IgnoreSensitive  : sensitiveをgeneral扱いにする"
+    Write-Host "  -Force            : 強制再解析"
+    Write-Host "  -Server           : サーバーモード"
+    Write-Host "  -Client           : クライアントモード"
+    Write-Host "  -h, -Help         : ヘルプ表示"
     Write-Host ""
 }
 
@@ -131,18 +134,88 @@ $IsWindows = $true
 if ($PSVersionTable.PSVersion.Major -ge 6) {
     if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
 }
+#endregion
 
-# Virtual Env Config
-if ($IsWindows -and $Gpu) {
-    $VenvDir = Join-Path $ScriptDir "venv_gpu"
-    $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
-} else {
-    $VenvDir = Join-Path $ScriptDir "venv_std"
-    $Requirements = @("onnxruntime", "pillow", "huggingface_hub", "numpy", "tqdm")
+#region Environment Setup Function
+function Prepare-Environment {
+    param (
+        [bool]$UseGpu
+    )
+
+    if ($IsWindows -and $UseGpu) {
+        $EnvName = "GPU (DirectML)"
+        $TargetVenv = Join-Path $ScriptDir "venv_gpu"
+        $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
+    } else {
+        $EnvName = "Standard (CPU)"
+        $TargetVenv = Join-Path $ScriptDir "venv_std"
+        $Requirements = @("onnxruntime", "pillow", "huggingface_hub", "numpy", "tqdm")
+    }
+
+    Write-Host "[INFO] 環境確認: $EnvName ($TargetVenv)" -ForegroundColor Cyan
+
+    # 1. Create venv
+    if (-not (Test-Path $TargetVenv)) {
+        Write-Host "  -> 仮想環境を作成中..." -ForegroundColor Yellow
+        if ($IsWindows) { python -m venv $TargetVenv } else { python3 -m venv $TargetVenv }
+    }
+
+    # Paths
+    if ($IsWindows) {
+        $Bin = Join-Path $TargetVenv "Scripts"
+        $PyEx = Join-Path $Bin "python.exe"
+        $PipEx = Join-Path $Bin "pip.exe"
+    } else {
+        $Bin = Join-Path $TargetVenv "bin"
+        $PyEx = Join-Path $Bin "python"
+        $PipEx = Join-Path $Bin "pip"
+    }
+
+    # 2. Update Pip (Silence warnings)
+    Write-Host "  -> pipを更新確認中..."
+    & $PyEx -m pip install --upgrade pip | Out-Null
+
+    # 3. Install Requirements
+    $Installed = & $PipEx list
+    $NeedsInstall = $false
+    foreach ($req in $Requirements) {
+        if ($Installed -notmatch $req) { $NeedsInstall = $true; break }
+    }
+
+    if ($NeedsInstall) {
+        Write-Host "  -> ライブラリをインストール中..." -ForegroundColor Yellow
+        & $PipEx install $Requirements | Out-Null
+    } else {
+        Write-Host "  -> ライブラリは最新じゃ。" -ForegroundColor Gray
+    }
+
+    return $PyEx
 }
 #endregion
 
 #region Execution Logic
+
+# Setup Mode
+if ($Setup) {
+    if ($All) {
+        $Py = Prepare-Environment -UseGpu $false
+        & $Py $PythonScript --gen-config # Python側でConfig生成
+        
+        if ($IsWindows) { 
+            $Py = Prepare-Environment -UseGpu $true
+            # 2回目は生成済みだが、念のため呼んでも無害
+            & $Py $PythonScript --gen-config 
+        }
+    } else {
+        $Py = Prepare-Environment -UseGpu $Gpu
+        & $Py $PythonScript --gen-config
+    }
+    
+    Write-Host "`n[INFO] 環境構築完了じゃ。" -ForegroundColor Green
+    exit
+}
+
+# Normal Execution
 $Mode = "standalone"
 if ($Server) { $Mode = "server" }
 if ($Client) { $Mode = "client" }
@@ -151,46 +224,39 @@ if ($Mode -ne "server") {
     Write-Host "[INFO] モード: $Mode"
 }
 
-# 1. Create venv
-if (-not (Test-Path $VenvDir)) {
-    Write-Host "[INFO] 仮想環境を作成中: $VenvDir ..." -ForegroundColor Yellow
-    if ($IsWindows) { python -m venv $VenvDir } else { python3 -m venv $VenvDir }
-}
-
-# 2. Activate & Install
-if ($IsWindows) {
-    $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-    $VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
-} else {
-    $VenvPython = Join-Path $VenvDir "bin/python"
-    $VenvPip = Join-Path $VenvDir "bin/pip"
-}
-
-$PipCheck = & $VenvPip list
-if ($PipCheck -notmatch "tqdm") {
-    Write-Host "[INFO] 必要なパッケージをインストール中..." -ForegroundColor Yellow
-    & $VenvPip install $Requirements | Out-Null
-}
-
-# 3. ExifTool Check
-if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
-    if ($IsWindows) {
-        if (-not (Test-Path (Join-Path $ScriptDir "exiftool.exe"))) {
-            Write-Host "[WARN] exiftool.exe が見つかりません！タグの書き込みに失敗する可能性があります。" -ForegroundColor Magenta
+# 3. ExifTool Check (Serverモードならチェックしない)
+if ($Mode -ne "server") {
+    if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
+        if ($IsWindows) {
+            if (-not (Test-Path (Join-Path $ScriptDir "exiftool.exe"))) {
+                Write-Host "[WARN] exiftool.exe が見つかりません！タグの書き込みに失敗する可能性があります。" -ForegroundColor Magenta
+            }
         }
     }
 }
+
+# Prepare Env
+$VenvPython = Prepare-Environment -UseGpu $Gpu
 
 # 4. Build Arguments
 $PyArgs = @($PythonScript, "--mode", $Mode)
 
 if ($Mode -eq "server") {
-    $PyArgs += ("--port", $Port)
+    if ($Port) { $PyArgs += ("--port", $Port) }
     if ($Gpu) { $PyArgs += "--gpu" }
 }
 elseif ($Mode -eq "client") {
-    $PyArgs += ($Path, "--host", $ServerAddr, "--port", $Port, "--thresh", $Thresh)
+    $PyArgs += ($Path, "--thresh", $Thresh)
+    if ($ServerAddr) { $PyArgs += ("--host", $ServerAddr) }
+    if ($Port) { $PyArgs += ("--port", $Port) }
     if ($Force) { $PyArgs += "--force" }
+    
+    # Client Mode Features
+    if ($Organize) { $PyArgs += "--organize" }
+    if ($IgnoreSensitive) { $PyArgs += "--ignore-sensitive" }
+    if ($PSBoundParameters.ContainsKey('RatingThresh')) {
+        $PyArgs += ("--rating-thresh", $RatingThresh)
+    }
 }
 else {
     # Standalone
@@ -202,6 +268,9 @@ else {
     if ($PSBoundParameters.ContainsKey('RatingThresh')) {
         $PyArgs += ("--rating-thresh", $RatingThresh)
     }
+    
+    if ($ServerAddr) { $PyArgs += ("--host", $ServerAddr) }
+    if ($Port) { $PyArgs += ("--port", $Port) }
 }
 
 Write-Host "[INFO] Pythonスクリプトを開始 ($Mode)..." -ForegroundColor Green

@@ -311,15 +311,12 @@ def collect_images(path_args, recursive=True):
                     collected.append(candidate)
     return sorted(list(set(collected)))
 
-# ★ 共通のレーティング判定ロジック ★
 def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive, fname_disp=""):
     """
     推論結果(probs)からレーティングを決定し、ログを出力する。
-    Returns: rating (str), detected_tags (list)
     """
     rating_probs = probs[:4]
     
-    # 確率表示
     def fmt_prob(p):
         val = p * 100
         if val >= 100: return "100.0%"
@@ -328,7 +325,6 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
     if fname_disp:
         tqdm.write(f"[{fname_disp}] Gen:{fmt_prob(rating_probs[0])} Sen:{fmt_prob(rating_probs[1])} Que:{fmt_prob(rating_probs[2])} Exp:{fmt_prob(rating_probs[3])}")
 
-    # レーティング判定
     if rating_thresh is not None:
         nsfw_probs = rating_probs[1:]
         max_nsfw_idx = np.argmax(nsfw_probs)
@@ -343,14 +339,12 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
     
     rating = tags[rating_idx]
 
-    # Sensitive細分化
     if rating == 'sensitive':
         if rating_probs[1] < split_thresh:
             rating = 'sensitive_mild'
         else:
             rating = 'sensitive_high'
     
-    # Ignore Sensitive
     if (rating == 'sensitive' or rating == 'sensitive_mild' or rating == 'sensitive_high') and ignore_sensitive:
         rating = 'general'
 
@@ -399,10 +393,6 @@ def run_server(port, use_gpu):
         print("\n[INFO] Server stopped.")
 
 def run_client(target_files, host, port, thresh, force, args):
-    """
-    クライアントモード実行関数。
-    argsには organize, rating_thresh, ignore_sensitive 等が含まれる
-    """
     url = f"http://{host}:{port}"
     print(f"[INFO] Connecting to Server: {url}")
     
@@ -428,11 +418,9 @@ def run_client(target_files, host, port, thresh, force, args):
             rating = None
             existing_tags = []
             
-            # クライアントモードでも既存タグチェックは有効
             if not force:
                 existing_tags = et_wrapper.get_tags(img_path)
             
-            # 推論が必要かどうかの判定 (Standaloneと同じロジック)
             need_inference = True
             if existing_tags and not force:
                 if args.rating_thresh is not None:
@@ -441,7 +429,7 @@ def run_client(target_files, host, port, thresh, force, args):
                     found_ratings = [t for t in existing_tags if t in RATING_TAGS]
                     if found_ratings:
                         rating = found_ratings[0]
-                        if rating == 'sensitive': # 細分化のために再計算
+                        if rating == 'sensitive':
                             need_inference = True
                         else:
                             need_inference = False
@@ -454,7 +442,6 @@ def run_client(target_files, host, port, thresh, force, args):
             probs = None
 
             if need_inference:
-                # サーバーへ画像送信
                 with open(img_path, 'rb') as f:
                     img_data = f.read()
                 req = urllib.request.Request(url, data=img_data, method='POST')
@@ -466,7 +453,6 @@ def run_client(target_files, host, port, thresh, force, args):
                     response_body = res.read()
                     probs = np.array(json.loads(response_body.decode('utf-8')))
                 
-                # ★ 共通ロジックでレーティング決定 ★
                 fname_disp = os.path.basename(img_path)
                 if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                 
@@ -478,7 +464,6 @@ def run_client(target_files, host, port, thresh, force, args):
                     fname_disp
                 )
 
-                # タグ抽出
                 for i, p in enumerate(probs):
                     if p > thresh:
                         detected_tags.append(tags[i])
@@ -495,7 +480,6 @@ def run_client(target_files, host, port, thresh, force, args):
             else:
                 skipped_count += 1
 
-            # Organize (クライアント側で移動)
             if args.organize and rating:
                 if organize_file(img_path, rating):
                     organized_count += 1
@@ -523,21 +507,25 @@ def main():
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--organize", action="store_true", help="Move images to folders based on rating")
-    
-    # ArgparseのdefaultをNoneにして、指定がなければConfigを使うようにする
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
+    # ★ 隠しオプション: Config生成用 ★
+    parser.add_argument("--gen-config", action="store_true", help="Generate config.json and exit")
+    
     args = parser.parse_args()
 
-    # Config値の適用 (引数がNoneならConfigを使う)
+    # Config生成モードなら即終了
+    if args.gen_config:
+        # load_config()が呼ばれた時点でファイルが無ければ作られている
+        sys.exit(0)
+
+    # Config適用
     if args.host is None:
         args.host = APP_CONFIG.get("server_host", "localhost")
     if args.port is None:
         args.port = APP_CONFIG.get("server_port", 5000)
 
-    # Configから閾値取得
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
-
     use_recursive = not args.organize
 
     if args.mode == 'server':
@@ -547,7 +535,6 @@ def main():
             print("Error: No images specified for client mode.")
             return
         files = collect_images(args.images, recursive=use_recursive)
-        # args全体を渡してクライアント内で判定ロジックを使えるようにする
         run_client(files, args.host, args.port, args.thresh, args.force, args)
     else:
         if not args.images:
@@ -598,7 +585,6 @@ def main():
                     img_input = preprocess(pil_image)
                     probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
                     
-                    # ★ 共通ロジック呼び出し ★
                     fname_disp = os.path.basename(img_path)
                     if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                     
