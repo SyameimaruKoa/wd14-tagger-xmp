@@ -43,7 +43,9 @@ RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 # ==========================================
 # ★ コンフィグ管理 (config.json) ★
 # ==========================================
-CONFIG_FILE = "config.json"
+# スクリプト自身のディレクトリを取得し、そこに config.json を置く
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
 DEFAULT_CONFIG = {
     "server_host": "localhost",
@@ -509,17 +511,13 @@ def main():
     parser.add_argument("--organize", action="store_true", help="Move images to folders based on rating")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
-    # ★ 隠しオプション: Config生成用 ★
     parser.add_argument("--gen-config", action="store_true", help="Generate config.json and exit")
     
     args = parser.parse_args()
 
-    # Config生成モードなら即終了
     if args.gen_config:
-        # load_config()が呼ばれた時点でファイルが無ければ作られている
         sys.exit(0)
 
-    # Config適用
     if args.host is None:
         args.host = APP_CONFIG.get("server_host", "localhost")
     if args.port is None:
