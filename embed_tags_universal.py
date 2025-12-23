@@ -50,11 +50,11 @@ DEFAULT_CONFIG = {
     "server_port": 5000,
     "sensitive_split_threshold": 0.50,
     "folder_names": {
-        "general": "general",
-        "sensitive_mild": "sensitive_mild",
-        "sensitive_high": "sensitive_high",
-        "questionable": "questionable",
-        "explicit": "explicit"
+        "general": "R-00",
+        "sensitive_mild": "R-15_0",
+        "sensitive_high": "R-15_5",
+        "questionable": "R-17",
+        "explicit": "R-18"
     }
 }
 
