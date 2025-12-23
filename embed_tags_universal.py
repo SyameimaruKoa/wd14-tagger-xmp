@@ -37,7 +37,6 @@ else:
 
 VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 
-# WD14 Rating Tags (Indices 0-3)
 RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 
 # ==========================================
@@ -45,6 +44,7 @@ RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+REPORT_LOG_FILE = os.path.join(SCRIPT_DIR, "report_log.json")
 
 DEFAULT_CONFIG = {
     "server_host": "localhost",
@@ -60,9 +60,7 @@ DEFAULT_CONFIG = {
 }
 
 def load_config():
-    """config.jsonを読み込む。なければデフォルトを作成する。"""
     config = DEFAULT_CONFIG.copy()
-    
     if not os.path.exists(CONFIG_FILE):
         print(f"[INFO] Creating default config file: {CONFIG_FILE}")
         try:
@@ -74,21 +72,16 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
-                # トップレベルのキーを更新
                 for key in ["server_host", "server_port", "sensitive_split_threshold"]:
                     if key in user_config:
                         config[key] = user_config[key]
-                # フォルダ名は辞書なのでupdate
                 if "folder_names" in user_config:
                     config["folder_names"].update(user_config["folder_names"])
-                
                 print(f"[INFO] Loaded config from {CONFIG_FILE}")
         except Exception as e:
             print(f"[WARN] Failed to load config file: {e}. Using defaults.")
-    
     return config
 
-# グローバル設定として保持
 APP_CONFIG = load_config()
 
 # ★ ANSIカラー定義 ★
@@ -97,15 +90,15 @@ class Colors:
     YELLOW = '\033[33m'
     MAGENTA = '\033[35m'
     RED = '\033[31m'
-    GREY = '\033[90m' # 暗い灰色（空のバー用）
+    GREY = '\033[90m'
     RESET = '\033[0m'
 
 def get_bar(prob, color, width=5):
-    """確率に応じたカラーバーを生成する"""
     fill_len = int(prob * width)
     empty_len = width - fill_len
-    # 色付きブロック + 灰色ブロック + リセット
     return f"{color}{'█' * fill_len}{Colors.GREY}{'░' * empty_len}{Colors.RESET}"
+
+REPORT_DATA = []
 
 class ExifToolWrapper:
     def __init__(self, cmd=EXIFTOOL_CMD):
@@ -148,14 +141,11 @@ class ExifToolWrapper:
         if not self.running:
             self.start()
             if not self.running: return ""
-
         try:
             for arg in args:
                 self.process.stdin.write(arg.encode('utf-8') + b"\n")
-            
             self.process.stdin.write(b"-execute\n")
             self.process.stdin.flush()
-
             output_lines = []
             while True:
                 line = self.process.stdout.readline()
@@ -164,9 +154,7 @@ class ExifToolWrapper:
                 if line_str == "{ready}":
                     break
                 output_lines.append(line_str)
-            
             return "\n".join(output_lines)
-
         except Exception as e:
             print(f"[Error] ExifTool communication: {e}")
             self.stop()
@@ -181,7 +169,6 @@ class ExifToolWrapper:
     def write_tags(self, path, tags):
         if not tags: return False
         tags_str = ", ".join(tags)
-        
         res = self.execute([
             "-overwrite_original", "-P", "-m", "-sep", ", ",
             f"-XMP:Subject={tags_str}",
@@ -201,7 +188,7 @@ def get_ip_addresses():
         ips.append(f"LAN: {lan_ip}")
     except Exception:
         pass
-
+    
     if IS_LINUX:
         try:
             cmd = ["ip", "-4", "addr", "show"]
@@ -233,7 +220,6 @@ def load_model_and_tags(use_gpu=False):
             providers.extend(['DmlExecutionProvider', 'CUDAExecutionProvider'])
         elif IS_LINUX:
             providers.extend(['CUDAExecutionProvider', 'ROCMExecutionProvider'])
-    
     providers.append('CPUExecutionProvider')
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 3
@@ -246,14 +232,12 @@ def load_model_and_tags(use_gpu=False):
         print(f"[WARN] Failed to load GPU provider. Error: {e}")
         print("[INFO] Fallback to CPU.")
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
-
     return sess, tags, sess.get_inputs()[0].name, sess.get_outputs()[0].name
 
 sess_global = None
 tags_global = None
 input_name_cache = None
 label_name_cache = None
-req_count = 0
 
 def init_global_model(use_gpu):
     global sess_global, tags_global, input_name_cache, label_name_cache
@@ -269,10 +253,6 @@ def preprocess(image, size=448):
     return img_np
 
 def organize_file(file_path, rating):
-    """Moves the file to a subfolder based on rating."""
-    if not rating:
-        return False
-    
     folder_mapping = APP_CONFIG.get("folder_names", {})
     folder_name = folder_mapping.get(rating, rating)
 
@@ -280,11 +260,10 @@ def organize_file(file_path, rating):
         abs_path = os.path.abspath(file_path)
         dir_name = os.path.dirname(abs_path)
         file_name = os.path.basename(abs_path)
-
         target_dir = os.path.join(dir_name, folder_name)
         
         if os.path.abspath(dir_name) == os.path.abspath(target_dir):
-            return False
+            return False, abs_path
 
         os.makedirs(target_dir, exist_ok=True)
         target_path = os.path.join(target_dir, file_name)
@@ -294,10 +273,10 @@ def organize_file(file_path, rating):
             target_path = os.path.join(target_dir, f"{base}_{uuid.uuid4().hex[:6]}{ext}")
 
         shutil.move(abs_path, target_path)
-        return True
+        return True, target_path
     except Exception as e:
         tqdm.write(f"[Warn] Failed to move {file_path}: {e}")
-        return False
+        return False, file_path
 
 def collect_images(path_args, recursive=True):
     collected = []
@@ -306,7 +285,6 @@ def collect_images(path_args, recursive=True):
             candidates = glob.glob(p, recursive=True)
         else:
             candidates = [p]
-        
         for candidate in candidates:
             if os.path.isdir(candidate):
                 print(f"[INFO] Scanning directory (Recursive={recursive}): {candidate}")
@@ -329,9 +307,6 @@ def collect_images(path_args, recursive=True):
     return sorted(list(set(collected)))
 
 def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive, fname_disp=""):
-    """
-    推論結果(probs)からレーティングを決定し、ログを出力する。
-    """
     rating_probs = probs[:4]
     
     def fmt_prob(p):
@@ -340,23 +315,17 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
         return f"{val:04.1f}%"
 
     if fname_disp:
-        # Gen:Green, Sen:Yellow, Que:Magenta, Exp:Red
         b_gen = get_bar(rating_probs[0], Colors.GREEN)
         b_sen = get_bar(rating_probs[1], Colors.YELLOW)
         b_que = get_bar(rating_probs[2], Colors.MAGENTA)
         b_exp = get_bar(rating_probs[3], Colors.RED)
 
-        tqdm.write(f"[{fname_disp}] "
-                   f"Gen:{b_gen} {fmt_prob(rating_probs[0])} "
-                   f"Sen:{b_sen} {fmt_prob(rating_probs[1])} "
-                   f"Que:{b_que} {fmt_prob(rating_probs[2])} "
-                   f"Exp:{b_exp} {fmt_prob(rating_probs[3])}")
+        tqdm.write(f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} Sen:{b_sen}{fmt_prob(rating_probs[1])} Que:{b_que}{fmt_prob(rating_probs[2])} Exp:{b_exp}{fmt_prob(rating_probs[3])}")
 
     if rating_thresh is not None:
         nsfw_probs = rating_probs[1:]
         max_nsfw_idx = np.argmax(nsfw_probs)
         max_nsfw_prob = nsfw_probs[max_nsfw_idx]
-        
         if max_nsfw_prob > rating_thresh:
             rating_idx = max_nsfw_idx + 1
         else:
@@ -422,9 +391,8 @@ def run_server(port, use_gpu):
 def run_client(target_files, host, port, thresh, force, args):
     url = f"http://{host}:{port}"
     print(f"[INFO] Connecting to Server: {url}")
-    
     et_wrapper.start()
-
+    
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
     tags = []
@@ -434,7 +402,6 @@ def run_client(target_files, host, port, thresh, force, args):
         tags = [row[1] for row in reader]
 
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
-
     processed_count = 0
     skipped_count = 0
     organized_count = 0
@@ -444,7 +411,6 @@ def run_client(target_files, host, port, thresh, force, args):
         try:
             rating = None
             existing_tags = []
-            
             if not force:
                 existing_tags = et_wrapper.get_tags(img_path)
             
@@ -456,17 +422,14 @@ def run_client(target_files, host, port, thresh, force, args):
                     found_ratings = [t for t in existing_tags if t in RATING_TAGS]
                     if found_ratings:
                         rating = found_ratings[0]
-                        if rating == 'sensitive':
-                            need_inference = True
-                        else:
-                            need_inference = False
-                    else:
-                        need_inference = True
-                else:
-                    need_inference = False
+                        if rating == 'sensitive': need_inference = True
+                        else: need_inference = False
+                    else: need_inference = True
+                else: need_inference = False
             
             detected_tags = []
             probs = None
+            final_path = img_path
 
             if need_inference:
                 with open(img_path, 'rb') as f:
@@ -483,17 +446,10 @@ def run_client(target_files, host, port, thresh, force, args):
                 fname_disp = os.path.basename(img_path)
                 if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                 
-                rating = calculate_rating(
-                    probs, tags, 
-                    args.rating_thresh, 
-                    split_thresh, 
-                    args.ignore_sensitive, 
-                    fname_disp
-                )
+                rating = calculate_rating(probs, tags, args.rating_thresh, split_thresh, args.ignore_sensitive, fname_disp)
 
                 for i, p in enumerate(probs):
-                    if p > thresh:
-                        detected_tags.append(tags[i])
+                    if p > thresh: detected_tags.append(tags[i])
                 
                 should_write = False
                 if not existing_tags: should_write = True
@@ -508,8 +464,18 @@ def run_client(target_files, host, port, thresh, force, args):
                 skipped_count += 1
 
             if args.organize and rating:
-                if organize_file(img_path, rating):
+                moved, new_path = organize_file(img_path, rating)
+                if moved: 
                     organized_count += 1
+                    final_path = new_path
+            
+            # レポートログ保存
+            if args.save_report and probs is not None:
+                REPORT_DATA.append({
+                    "path": os.path.abspath(final_path),
+                    "rating": rating,
+                    "probs": probs[:4].tolist()
+                })
 
         except urllib.error.URLError as e:
             tqdm.write(f"Connection Error: {e}")
@@ -523,34 +489,34 @@ def run_client(target_files, host, port, thresh, force, args):
     
     et_wrapper.stop()
     print(f"\n[Done] Processed: {processed_count}, Skipped: {skipped_count}, Organized: {organized_count}")
+    
+    if args.save_report and REPORT_DATA:
+        with open(REPORT_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(REPORT_DATA, f, ensure_ascii=False)
+        print(f"[INFO] Report log saved to {REPORT_LOG_FILE}")
 
 def main():
     parser = argparse.ArgumentParser(description="WD14 Tagger Universal")
     parser.add_argument("--mode", choices=['standalone', 'server', 'client'], default='standalone')
     parser.add_argument("images", nargs='*')
     parser.add_argument("--thresh", type=float, default=0.35)
-    parser.add_argument("--rating-thresh", type=float, default=None, help="Threshold for non-general rating")
-    parser.add_argument("--ignore-sensitive", action="store_true", help="Treat sensitive as general")
+    parser.add_argument("--rating-thresh", type=float, default=None)
+    parser.add_argument("--ignore-sensitive", action="store_true")
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--organize", action="store_true", help="Move images to folders based on rating")
+    parser.add_argument("--organize", action="store_true")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
-    parser.add_argument("--gen-config", action="store_true", help="Generate config.json and exit")
+    parser.add_argument("--gen-config", action="store_true")
+    parser.add_argument("--save-report", action="store_true")
     
     args = parser.parse_args()
 
-    # Windowsのコマンドプロンプト用にANSIエスケープシーケンスを有効化
-    if IS_WINDOWS:
-        os.system('')
+    if IS_WINDOWS: os.system('')
+    if args.gen_config: sys.exit(0)
 
-    if args.gen_config:
-        sys.exit(0)
-
-    if args.host is None:
-        args.host = APP_CONFIG.get("server_host", "localhost")
-    if args.port is None:
-        args.port = APP_CONFIG.get("server_port", 5000)
+    if args.host is None: args.host = APP_CONFIG.get("server_host", "localhost")
+    if args.port is None: args.port = APP_CONFIG.get("server_port", 5000)
 
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
     use_recursive = not args.organize
@@ -564,6 +530,7 @@ def main():
         files = collect_images(args.images, recursive=use_recursive)
         run_client(files, args.host, args.port, args.thresh, args.force, args)
     else:
+        # Standalone
         if not args.images:
             parser.print_help()
             return
@@ -584,29 +551,24 @@ def main():
             try:
                 rating = None
                 existing_tags = []
-                
                 existing_tags = et_wrapper.get_tags(img_path)
                 
                 need_inference = True
-                
                 if existing_tags and not args.force:
-                    if args.rating_thresh is not None:
-                        need_inference = True
+                    if args.rating_thresh is not None: need_inference = True
                     elif args.organize:
-                        found_ratings = [t for t in existing_tags if t in RATING_TAGS]
-                        if found_ratings:
-                            rating = found_ratings[0]
-                            if rating == 'sensitive': 
-                                need_inference = True 
-                            else:
-                                need_inference = False
-                        else:
-                            need_inference = True
-                    else:
-                        need_inference = False
+                        found = [t for t in existing_tags if t in RATING_TAGS]
+                        if found:
+                            rating = found[0]
+                            if rating == 'sensitive': need_inference = True
+                            else: need_inference = False
+                        else: need_inference = True
+                    else: need_inference = False
                 
                 detected_tags = []
-                
+                probs = None
+                final_path = img_path
+
                 if need_inference:
                     pil_image = Image.open(img_path)
                     img_input = preprocess(pil_image)
@@ -615,33 +577,33 @@ def main():
                     fname_disp = os.path.basename(img_path)
                     if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                     
-                    rating = calculate_rating(
-                        probs, tags_global, 
-                        args.rating_thresh, 
-                        split_thresh, 
-                        args.ignore_sensitive, 
-                        fname_disp
-                    )
+                    rating = calculate_rating(probs, tags_global, args.rating_thresh, split_thresh, args.ignore_sensitive, fname_disp)
 
                     for i, p in enumerate(probs):
-                        if p > args.thresh:
-                            detected_tags.append(tags_global[i])
+                        if p > args.thresh: detected_tags.append(tags_global[i])
                     
                     should_write = False
                     if not existing_tags: should_write = True
                     if args.force: should_write = True
                     
                     if should_write and detected_tags:
-                        if et_wrapper.write_tags(img_path, detected_tags):
-                            processed += 1
-                    elif not should_write:
-                        skipped += 1
+                        if et_wrapper.write_tags(img_path, detected_tags): processed += 1
+                    elif not should_write: skipped += 1
                 else:
                     skipped += 1
                 
                 if args.organize and rating:
-                    if organize_file(img_path, rating):
+                    moved, new_path = organize_file(img_path, rating)
+                    if moved: 
                         organized += 1
+                        final_path = new_path
+                
+                if args.save_report and probs is not None:
+                    REPORT_DATA.append({
+                        "path": os.path.abspath(final_path),
+                        "rating": rating,
+                        "probs": probs[:4].tolist()
+                    })
 
             except KeyboardInterrupt:
                 print("\n[INFO] Stopping...")
@@ -651,7 +613,12 @@ def main():
                 tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
         
         et_wrapper.stop()
-        print(f"\n[Done] Processed (Tagged): {processed}, Skipped: {skipped}, Organized: {organized}")
+        print(f"\n[Done] Processed: {processed}, Skipped: {skipped}, Organized: {organized}")
+
+        if args.save_report and REPORT_DATA:
+            with open(REPORT_LOG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(REPORT_DATA, f, ensure_ascii=False)
+            print(f"[INFO] Report log saved to {REPORT_LOG_FILE}")
 
 if __name__ == "__main__":
     main()

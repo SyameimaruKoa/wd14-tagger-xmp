@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    WD14 Tagger Universal ラッパー (スタンドアロン / サーバー / クライアント)
+    WD14 Tagger Universal Wrapper (Standalone / Server / Client)
 
 .DESCRIPTION
     画像認識AI (WD14 Tagger) を使用して画像のタグ付けや整理を行うスクリプトじゃ。
@@ -50,12 +50,12 @@
 .PARAMETER ServerAddr
     【サーバーアドレス】 (文字列)
     クライアントモードで接続する先のIPアドレスじゃ。
-    デフォルト: "localhost"
+    デフォルト: "localhost" (config.jsonで変更可)
 
 .PARAMETER Port
     【ポート番号】 (整数)
     サーバーとの通信に使用するポート番号じゃ。
-    デフォルト: 5000
+    デフォルト: 5000 (config.jsonで変更可)
 
 .PARAMETER Gpu
     【GPU使用】 (スイッチ)
@@ -73,9 +73,25 @@
     移動先: general, sensitive, questionable, explicit
     ※タグ付けと同時に整理したい時に使うのじゃ。
 
+.PARAMETER Setup
+    【環境構築モード】 (スイッチ)
+    Pythonスクリプトを実行せず、仮想環境の作成とライブラリインストールのみを行う。
+    初回導入時や、ライブラリを更新したい時に使うがよい。
+    ※この時 config.json も生成されるぞ。
+
+.PARAMETER All
+    【全環境作成】 (スイッチ)
+    -Setup と組み合わせて使う。
+    CPU環境(venv_std)とGPU環境(venv_gpu)の両方をまとめて作成・更新する。
+
+.PARAMETER Report
+    【レポート作成】 (スイッチ)
+    推論結果のログを保存し、処理完了後にHTMLレポートを生成する。
+    フォルダ整理を行った後に確認用として便利じゃ。
+
 .EXAMPLE
-    .\run_tagger.ps1 -Path 'C:\Images' -Gpu -Organize -IgnoreSensitive
-    sensitive判定を無視して general に統合してフォルダ分けする。
+    .\run_tagger.ps1 -Setup -All
+    CPU用とGPU用の仮想環境を両方作成し、config.jsonを生成して終了する。
 #>
 
 [CmdletBinding()]
@@ -93,6 +109,7 @@ param (
     [switch]$Organize,
     [switch]$Setup,
     [switch]$All,
+    [switch]$Report,
     [Alias('h')]
     [switch]$Help
 )
@@ -101,7 +118,7 @@ param (
 function Show-Help {
     Write-Host "=== WD14 Tagger Universal (日本語ヘルプ) ===" -ForegroundColor Cyan
     Write-Host "使い方:"
-    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize"
+    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize [-Report]"
     Write-Host "  環境構築   : .\run_tagger.ps1 -Setup [-All] [-Gpu]"
     Write-Host "  サーバー   : .\run_tagger.ps1 -Server -Gpu"
     Write-Host "  クライアント: .\run_tagger.ps1 -Client -Path 'フォルダパス'"
@@ -110,6 +127,7 @@ function Show-Help {
     Write-Host "  -Path             : 処理対象パス (既定: *.webp)"
     Write-Host "  -Gpu              : GPUを使用"
     Write-Host "  -Organize         : フォルダ振り分けモード"
+    Write-Host "  -Report           : HTMLレポートを作成"
     Write-Host "  -Setup            : 環境構築のみ実行"
     Write-Host "  -All              : Setup時に全環境(CPU/GPU)を作成"
     Write-Host "  -Thresh           : タグ確信度閾値 (0.35)"
@@ -241,6 +259,9 @@ $VenvPython = Prepare-Environment -UseGpu $Gpu
 # 4. Build Arguments
 $PyArgs = @($PythonScript, "--mode", $Mode)
 
+# Report Mode: Save log in Python
+if ($Report) { $PyArgs += "--save-report" }
+
 if ($Mode -eq "server") {
     if ($Port) { $PyArgs += ("--port", $Port) }
     if ($Gpu) { $PyArgs += "--gpu" }
@@ -275,4 +296,11 @@ else {
 
 Write-Host "[INFO] Pythonスクリプトを開始 ($Mode)..." -ForegroundColor Green
 & $VenvPython @PyArgs
+
+# Report generation step
+if ($Report) {
+    Write-Host "`n[INFO] レポートHTMLを作成中..." -ForegroundColor Cyan
+    $ReportScript = Join-Path $ScriptDir "make_report.py"
+    & $VenvPython $ReportScript
+}
 #endregion

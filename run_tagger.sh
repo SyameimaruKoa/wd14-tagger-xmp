@@ -6,6 +6,7 @@
 
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 PYTHON_SCRIPT="$SCRIPT_DIR/embed_tags_universal.py"
+REPORT_SCRIPT="$SCRIPT_DIR/make_report.py"
 
 MODE="standalone"
 THRESH=0.35
@@ -14,6 +15,7 @@ USE_GPU=0
 FORCE_MODE=0
 ORGANIZE_MODE=0
 IGNORE_SENSITIVE=0
+REPORT_MODE=0
 HOST_IP=""
 PORT=""
 SETUP_MODE=0
@@ -25,15 +27,19 @@ show_help() {
     echo "Usage: ./run_tagger.sh [OPTIONS] [PATH...]"
     echo ""
     echo "Modes:"
+    echo "  --setup             Setup venv only"
     echo "  --server            Start GPU Server mode"
     echo "  --client            Start Client mode"
     echo ""
     echo "Options:"
     echo "  -g, --gpu           Use GPU (Auto-detect)"
+    echo "  --all               (With --setup) Setup both CPU and GPU envs"
     echo "  -p, --path <path>   Target file/folder"
     echo "  -H, --host <ip>     Server IP"
     echo "  --organize          Move files to folders based on rating"
+    echo "  --report            Generate HTML report"
     echo "  --rating-thresh <v> Min confidence for sensitive/questionable/explicit"
+    echo "  --ignore-sensitive  Treat sensitive as general"
     echo "  -f, --force         Force overwrite tags"
     echo "  -h, --help          Show help"
     echo ""
@@ -52,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         -t|--thresh) THRESH="$2"; shift 2 ;;
         --rating-thresh) RATING_THRESH="$2"; shift 2 ;;
         --ignore-sensitive) IGNORE_SENSITIVE=1; shift ;;
+        --report) REPORT_MODE=1; shift ;;
         -g|--gpu|-gpu) USE_GPU=1; shift ;;
         -f|--force|--force) FORCE_MODE=1; shift ;;
         --organize) ORGANIZE_MODE=1; shift ;;
@@ -92,7 +99,6 @@ setup_env() {
     echo "[INFO] Installing requirements..."
     $PIP_CMD install pillow huggingface_hub numpy tqdm
 
-    # GPU / CPU specific packages
     if [ $use_gpu -eq 1 ]; then
         if command -v nvidia-smi &> /dev/null; then
             echo "[INFO] NVIDIA GPU detected."
@@ -112,7 +118,7 @@ setup_env() {
         $PIP_CMD install onnxruntime
     fi
     
-    # ★ ここでConfigを生成 (Setupモード時) ★
+    # Generate Config via Python (using env python)
     if [ $SETUP_MODE -eq 1 ]; then
         $PYTHON_CMD "$PYTHON_SCRIPT" --gen-config
     fi
@@ -134,7 +140,7 @@ fi
 
 # --- Normal Execution ---
 
-# 0. ExifTool Check (Serverモードならスキップ)
+# 0. ExifTool Check (Skip if Server mode)
 if [ "$MODE" != "server" ] && [ "$(uname)" == "Linux" ]; then
     if ! command -v exiftool &> /dev/null; then
         echo "[INFO] ExifTool not found. Checking installation method..."
@@ -172,6 +178,7 @@ fi
 # Build Args
 ARGS="--mode $MODE"
 if [ -n "$PORT" ]; then ARGS="$ARGS --port $PORT"; fi
+if [ $REPORT_MODE -eq 1 ]; then ARGS="$ARGS --save-report"; fi
 
 if [ "$MODE" == "server" ]; then
     if [ $USE_GPU -eq 1 ]; then ARGS="$ARGS --gpu"; fi
@@ -194,6 +201,13 @@ else
     if [ -n "$RATING_THRESH" ]; then ARGS="$ARGS --rating-thresh $RATING_THRESH"; fi
     if [ -n "$HOST_IP" ]; then ARGS="$ARGS --host $HOST_IP"; fi
     python3 "$PYTHON_SCRIPT" "${TARGET_FILES[@]}" $ARGS
+fi
+
+# Make Report if requested
+if [ $REPORT_MODE -eq 1 ]; then
+    echo ""
+    echo "[INFO] Generating HTML Report..."
+    python3 "$REPORT_SCRIPT"
 fi
 
 echo "[INFO] Done."
