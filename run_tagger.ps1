@@ -13,6 +13,11 @@
 .PARAMETER Thresh
     Threshold for tag confidence (Default: 0.35).
 
+.PARAMETER RatingThresh
+    Threshold for non-general ratings (sensitive/questionable/explicit).
+    If the confidence is lower than this value, it defaults to 'general'.
+    Example: 0.5 (Only classify as sensitive if confidence > 0.5).
+
 .PARAMETER Server
     Start as Server mode.
 
@@ -20,7 +25,7 @@
     Start as Client mode.
 
 .PARAMETER ServerAddr
-    Server IP Address (for Client mode). Renamed from HostIP to avoid conflict with Help.
+    Server IP Address (for Client mode).
 
 .PARAMETER Port
     Server Port (Default: 5000).
@@ -33,17 +38,17 @@
 
 .PARAMETER Organize
     Move files to folders (general/sensitive/questionable/explicit) based on rating.
-    If tags exist, it uses the existing rating tag. If not, it runs inference.
 
 .EXAMPLE
-    .\run_tagger.ps1 -Path 'C:\Images' -Gpu -Organize
-    Process images in C:\Images using GPU, and move them to rating folders.
+    .\run_tagger.ps1 -Path 'C:\Images' -Gpu -Organize -RatingThresh 0.5
+    Move files to rating folders. 'sensitive' is only chosen if confidence > 0.5.
 #>
 
 [CmdletBinding()]
 param (
     [string]$Path = "*.webp",
     [float]$Thresh = 0.35,
+    [float]$RatingThresh,
     [switch]$Server,
     [switch]$Client,
     [string]$ServerAddr = "localhost",
@@ -64,8 +69,9 @@ function Show-Help {
     Write-Host "  Client     : .\run_tagger.ps1 -Client -Path 'C:\Imgs' -ServerAddr '192.168.x.x'"
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -Organize  : Move files to folders based on rating."
-    Write-Host "  -h, -Help  : Show this help"
+    Write-Host "  -Organize     : Move files to folders based on rating."
+    Write-Host "  -RatingThresh : Min confidence for sensitive/questionable/explicit (e.g., 0.5)."
+    Write-Host "  -h, -Help     : Show this help"
     Write-Host ""
 }
 
@@ -148,6 +154,9 @@ else {
     if ($Gpu) { $PyArgs += "--gpu" }
     if ($Force) { $PyArgs += "--force" }
     if ($Organize) { $PyArgs += "--organize" }
+    if ($PSBoundParameters.ContainsKey('RatingThresh')) {
+        $PyArgs += ("--rating-thresh", $RatingThresh)
+    }
 }
 
 Write-Host "[INFO] Starting Python ($Mode)..." -ForegroundColor Green

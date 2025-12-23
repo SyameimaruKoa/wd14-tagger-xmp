@@ -322,6 +322,7 @@ def main():
     parser.add_argument("--mode", choices=['standalone', 'server', 'client'], default='standalone')
     parser.add_argument("images", nargs='*')
     parser.add_argument("--thresh", type=float, default=0.35)
+    parser.add_argument("--rating-thresh", type=float, default=None, help="Threshold for non-general rating")
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--organize", action="store_true", help="Move images to folders based on rating")
@@ -361,20 +362,27 @@ def main():
                 if has_xmp_tags(img_path):
                     existing_tags = get_xmp_tags(img_path)
                 
-                # Logic: If NOT force and tags exist, skip inference (unless we need to organize and rating is missing)
                 need_inference = True
+                
                 if existing_tags and not args.force:
-                    need_inference = False
-                    # If organizing, we try to find rating in existing tags
-                    if args.organize:
+                    # 1. rating_thresh is set -> Must infer (existing tags lack probability)
+                    if args.rating_thresh is not None:
+                        need_inference = True
+                    
+                    # 2. Organizing? Try to use existing rating tag
+                    elif args.organize:
                         found_ratings = [t for t in existing_tags if t in RATING_TAGS]
                         if found_ratings:
                             rating = found_ratings[0]
+                            need_inference = False
                         else:
-                            # Tags exist but no rating -> Need inference just for rating? 
-                            # Let's run inference to determine rating if we really want to organize
+                            # Organize requested but no rating tag -> Must infer
                             need_inference = True
-
+                    
+                    # 3. Just tagging, tags exist -> Skip
+                    else:
+                        need_inference = False
+                
                 detected_tags = []
                 
                 if need_inference:
@@ -383,7 +391,25 @@ def main():
                     probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
                     
                     # Determine Rating (First 4 outputs)
-                    rating_idx = np.argmax(probs[:4])
+                    # probs[:4] = [general, sensitive, questionable, explicit]
+                    rating_probs = probs[:4]
+                    
+                    if args.rating_thresh is not None:
+                        # Custom threshold logic
+                        nsfw_probs = rating_probs[1:] # sensitive, questionable, explicit
+                        max_nsfw_idx = np.argmax(nsfw_probs) # 0,1,2 relative
+                        max_nsfw_prob = nsfw_probs[max_nsfw_idx]
+                        
+                        if max_nsfw_prob > args.rating_thresh:
+                            # It is strong enough (index + 1 because 0 is general)
+                            rating_idx = max_nsfw_idx + 1
+                        else:
+                            # Force General
+                            rating_idx = 0
+                    else:
+                        # Standard Argmax
+                        rating_idx = np.argmax(rating_probs)
+                    
                     rating = tags_global[rating_idx]
 
                     # Collect tags above threshold
@@ -391,13 +417,7 @@ def main():
                         if p > args.thresh:
                             detected_tags.append(tags_global[i])
                     
-                    # Write tags if we did inference (and not just for rating check)
-                    # If tags existed and we only ran inference for rating (because rating was missing),
-                    # we might want to APPEND rating? Or just leave it?
-                    # For simplicity: If we ran inference, we overwrite/write tags if force or no tags.
-                    # If we ran inference purely to get rating for existing tagged file, maybe don't write?
-                    # Let's stick to standard behavior: If inference ran, we try to write if force is on or tags were empty.
-                    
+                    # Determine if we should write tags
                     should_write = False
                     if not existing_tags: should_write = True
                     if args.force: should_write = True
@@ -406,6 +426,9 @@ def main():
                         if write_xmp_passthrough_safe(img_path, detected_tags):
                             processed += 1
                     elif not should_write:
+                        # Even if we don't write, we might have inferred for organizing.
+                        # So we count as 'skipped' writing, but maybe 'processed' analysis?
+                        # Keeping standard logic: processed = tags written.
                         skipped += 1
                 else:
                     skipped += 1
@@ -420,7 +443,7 @@ def main():
             except Exception as e:
                 tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
         
-        print(f"\n[Done] Processed: {processed}, Skipped: {skipped}, Organized: {organized}")
+        print(f"\n[Done] Processed (Tagged): {processed}, Skipped: {skipped}, Organized: {organized}")
 
 if __name__ == "__main__":
     main()

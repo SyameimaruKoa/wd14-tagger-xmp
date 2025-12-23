@@ -9,6 +9,7 @@ PYTHON_SCRIPT="$SCRIPT_DIR/embed_tags_universal.py"
 
 MODE="standalone"
 THRESH=0.35
+RATING_THRESH=""
 USE_GPU=0
 FORCE_MODE=0
 ORGANIZE_MODE=0
@@ -28,6 +29,7 @@ show_help() {
     echo "  -p, --path <path>   Target file/folder"
     echo "  -H, --host <ip>     Server IP"
     echo "  --organize          Move files to folders based on rating"
+    echo "  --rating-thresh <v> Min confidence for sensitive/questionable/explicit"
     echo "  -f, --force         Force overwrite tags"
     echo "  -h, --help          Show help"
     echo ""
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         -p|--path) 
             if [[ "$2" != -* ]] && [[ -n "$2" ]]; then TARGET_FILES+=("$2"); shift 2; else shift; fi ;;
         -t|--thresh) THRESH="$2"; shift 2 ;;
+        --rating-thresh) RATING_THRESH="$2"; shift 2 ;;
         -g|--gpu|-gpu) USE_GPU=1; shift ;;
         -f|--force|--force) FORCE_MODE=1; shift ;;
         --organize) ORGANIZE_MODE=1; shift ;;
@@ -156,6 +159,7 @@ else
     if [ $USE_GPU -eq 1 ]; then ARGS="$ARGS --gpu"; fi
     if [ $FORCE_MODE -eq 1 ]; then ARGS="$ARGS --force"; fi
     if [ $ORGANIZE_MODE -eq 1 ]; then ARGS="$ARGS --organize"; fi
+    if [ -n "$RATING_THRESH" ]; then ARGS="$ARGS --rating-thresh $RATING_THRESH"; fi
     python3 "$PYTHON_SCRIPT" "${TARGET_FILES[@]}" $ARGS
 fi
 
