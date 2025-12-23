@@ -40,6 +40,14 @@ VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 # WD14 Rating Tags (Indices 0-3)
 RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 
+# ★ フォルダ名の設定 (ここを変えればフォルダ名が変わる) ★
+FOLDER_NAMES = {
+    'general': '一般',
+    'sensitive': 'センシティブ',
+    'questionable': 'R-15',
+    'explicit': 'R-18'
+}
+
 class ExifToolWrapper:
     def __init__(self, cmd=EXIFTOOL_CMD):
         self.cmd = cmd
@@ -206,33 +214,25 @@ def organize_file(file_path, rating):
     if not rating:
         return False
     
+    # マッピングからフォルダ名を取得 (未定義ならそのまま使う)
+    folder_name = FOLDER_NAMES.get(rating, rating)
+
     try:
         abs_path = os.path.abspath(file_path)
         dir_name = os.path.dirname(abs_path)
         file_name = os.path.basename(abs_path)
-        parent_dir_name = os.path.basename(dir_name)
 
-        # 1. 既に正しいフォルダにいるなら移動しない
-        if parent_dir_name == rating:
+        # ターゲットフォルダ
+        target_dir = os.path.join(dir_name, folder_name)
+        
+        # 自分自身と同じなら移動しない
+        if os.path.abspath(dir_name) == os.path.abspath(target_dir):
             return False
-        
-        # 2. 別のレーティングフォルダ(sensitive等)にいる場合、一つ上の階層を基準にする
-        if parent_dir_name in RATING_TAGS:
-            base_dir = os.path.dirname(dir_name)
-        else:
-            # 3. 未整理のフォルダにいる場合、そのままそこを基準にする
-            base_dir = dir_name
 
-        target_dir = os.path.join(base_dir, rating)
         os.makedirs(target_dir, exist_ok=True)
-        
         target_path = os.path.join(target_dir, file_name)
         
-        # 移動先が自分自身なら何もしない
-        if os.path.abspath(target_path) == abs_path:
-            return False
-
-        # ファイル名重複回避
+        # 重複回避
         if os.path.exists(target_path):
             base, ext = os.path.splitext(file_name)
             target_path = os.path.join(target_dir, f"{base}_{uuid.uuid4().hex[:6]}{ext}")
@@ -243,20 +243,30 @@ def organize_file(file_path, rating):
         tqdm.write(f"[Warn] Failed to move {file_path}: {e}")
         return False
 
-def collect_images(path_args):
+def collect_images(path_args, recursive=True):
     collected = []
     for p in path_args:
         if '*' in p or '?' in p:
             candidates = glob.glob(p, recursive=True)
         else:
             candidates = [p]
+        
         for candidate in candidates:
             if os.path.isdir(candidate):
-                print(f"[INFO] Scanning directory: {candidate}")
-                for root, _, files in os.walk(candidate):
-                    for f in files:
-                        if f.lower().endswith(VALID_EXTS):
-                            collected.append(os.path.join(root, f))
+                print(f"[INFO] Scanning directory (Recursive={recursive}): {candidate}")
+                if recursive:
+                    for root, _, files in os.walk(candidate):
+                        for f in files:
+                            if f.lower().endswith(VALID_EXTS):
+                                collected.append(os.path.join(root, f))
+                else:
+                    try:
+                        for f in os.listdir(candidate):
+                            full_path = os.path.join(candidate, f)
+                            if os.path.isfile(full_path) and f.lower().endswith(VALID_EXTS):
+                                collected.append(full_path)
+                    except OSError:
+                        pass
             elif os.path.isfile(candidate):
                 if candidate.lower().endswith(VALID_EXTS):
                     collected.append(candidate)
@@ -372,19 +382,22 @@ def main():
     parser.add_argument("--port", type=int, default=5000)
     args = parser.parse_args()
 
+    # Recursion logic: Organize = No recursion
+    use_recursive = not args.organize
+
     if args.mode == 'server':
         run_server(args.port, args.gpu)
     elif args.mode == 'client':
         if not args.images:
             print("Error: No images specified for client mode.")
             return
-        files = collect_images(args.images)
+        files = collect_images(args.images, recursive=use_recursive)
         run_client(files, args.host, args.port, args.thresh, args.force)
     else:
         if not args.images:
             parser.print_help()
             return
-        files = collect_images(args.images)
+        files = collect_images(args.images, recursive=use_recursive)
         if not files:
             print("No files found.")
             return
@@ -428,6 +441,11 @@ def main():
                     
                     rating_probs = probs[:4]
                     
+                    # ★ 確率を表示 (General, Sensitive, Questionable, Explicit)
+                    fname_disp = os.path.basename(img_path)
+                    if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
+                    tqdm.write(f"[{fname_disp}] Gen:{rating_probs[0]:.2f} Sen:{rating_probs[1]:.2f} Que:{rating_probs[2]:.2f} Exp:{rating_probs[3]:.2f}")
+
                     if args.rating_thresh is not None:
                         nsfw_probs = rating_probs[1:]
                         max_nsfw_idx = np.argmax(nsfw_probs)
