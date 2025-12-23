@@ -7,6 +7,7 @@
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
 PYTHON_SCRIPT="$SCRIPT_DIR/embed_tags_universal.py"
 REPORT_SCRIPT="$SCRIPT_DIR/make_report.py"
+LOG_FILE="./report_log.json"
 
 MODE="standalone"
 THRESH=0.35
@@ -15,7 +16,7 @@ USE_GPU=0
 FORCE_MODE=0
 ORGANIZE_MODE=0
 IGNORE_SENSITIVE=0
-REPORT_MODE=0
+REPORT_ONLY=0
 HOST_IP=""
 PORT=""
 SETUP_MODE=0
@@ -37,7 +38,7 @@ show_help() {
     echo "  -p, --path <path>   Target file/folder"
     echo "  -H, --host <ip>     Server IP"
     echo "  --organize          Move files to folders based on rating"
-    echo "  --report            Generate HTML report"
+    echo "  --report            Force report generation only (Skip tagging)"
     echo "  --rating-thresh <v> Min confidence for sensitive/questionable/explicit"
     echo "  --ignore-sensitive  Treat sensitive as general"
     echo "  -f, --force         Force overwrite tags"
@@ -58,7 +59,7 @@ while [[ $# -gt 0 ]]; do
         -t|--thresh) THRESH="$2"; shift 2 ;;
         --rating-thresh) RATING_THRESH="$2"; shift 2 ;;
         --ignore-sensitive) IGNORE_SENSITIVE=1; shift ;;
-        --report) REPORT_MODE=1; shift ;;
+        --report) REPORT_ONLY=1; shift ;;
         -g|--gpu|-gpu) USE_GPU=1; shift ;;
         -f|--force|--force) FORCE_MODE=1; shift ;;
         --organize) ORGANIZE_MODE=1; shift ;;
@@ -118,7 +119,6 @@ setup_env() {
         $PIP_CMD install onnxruntime
     fi
     
-    # Generate Config via Python (using env python)
     if [ $SETUP_MODE -eq 1 ]; then
         $PYTHON_CMD "$PYTHON_SCRIPT" --gen-config
     fi
@@ -140,7 +140,7 @@ fi
 
 # --- Normal Execution ---
 
-# 0. ExifTool Check (Skip if Server mode)
+# 0. ExifTool Check
 if [ "$MODE" != "server" ] && [ "$(uname)" == "Linux" ]; then
     if ! command -v exiftool &> /dev/null; then
         echo "[INFO] ExifTool not found. Checking installation method..."
@@ -175,10 +175,21 @@ if [ $USE_GPU -eq 1 ] && command -v nvidia-smi &> /dev/null; then
     done
 fi
 
-# Build Args
-ARGS="--mode $MODE"
+# ★ Report Only Mode
+if [ $REPORT_ONLY -eq 1 ]; then
+    if [ -f "$LOG_FILE" ]; then
+        echo ""
+        echo "[INFO] Generating HTML Report from existing log..."
+        python3 "$REPORT_SCRIPT"
+    else
+        echo "[WARN] No report log found ($LOG_FILE). Run tagging first."
+    fi
+    exit 0
+fi
+
+# Build Args (Always add --save-report)
+ARGS="--mode $MODE --save-report"
 if [ -n "$PORT" ]; then ARGS="$ARGS --port $PORT"; fi
-if [ $REPORT_MODE -eq 1 ]; then ARGS="$ARGS --save-report"; fi
 
 if [ "$MODE" == "server" ]; then
     if [ $USE_GPU -eq 1 ]; then ARGS="$ARGS --gpu"; fi
@@ -203,8 +214,8 @@ else
     python3 "$PYTHON_SCRIPT" "${TARGET_FILES[@]}" $ARGS
 fi
 
-# Make Report if requested
-if [ $REPORT_MODE -eq 1 ]; then
+# Automatic Report Generation (If log exists)
+if [ -f "$LOG_FILE" ]; then
     echo ""
     echo "[INFO] Generating HTML Report..."
     python3 "$REPORT_SCRIPT"

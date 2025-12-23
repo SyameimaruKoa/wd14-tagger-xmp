@@ -85,9 +85,10 @@
     CPU環境(venv_std)とGPU環境(venv_gpu)の両方をまとめて作成・更新する。
 
 .PARAMETER Report
-    【レポート作成】 (スイッチ)
-    推論結果のログを保存し、処理完了後にHTMLレポートを生成する。
-    フォルダ整理を行った後に確認用として便利じゃ。
+    【強制レポート作成】 (スイッチ)
+    解析処理(Python)をスキップし、既存のログファイル(report_log.json)からHTMLレポートのみを生成する。
+    ※通常は解析後に自動でレポートが作られるため、このオプションは不要じゃ。
+    手動でレポートだけ作り直したい時専用じゃ。
 
 .EXAMPLE
     .\run_tagger.ps1 -Setup -All
@@ -118,7 +119,7 @@ param (
 function Show-Help {
     Write-Host "=== WD14 Tagger Universal (日本語ヘルプ) ===" -ForegroundColor Cyan
     Write-Host "使い方:"
-    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize [-Report]"
+    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize"
     Write-Host "  環境構築   : .\run_tagger.ps1 -Setup [-All] [-Gpu]"
     Write-Host "  サーバー   : .\run_tagger.ps1 -Server -Gpu"
     Write-Host "  クライアント: .\run_tagger.ps1 -Client -Path 'フォルダパス'"
@@ -127,7 +128,7 @@ function Show-Help {
     Write-Host "  -Path             : 処理対象パス (既定: *.webp)"
     Write-Host "  -Gpu              : GPUを使用"
     Write-Host "  -Organize         : フォルダ振り分けモード"
-    Write-Host "  -Report           : HTMLレポートを作成"
+    Write-Host "  -Report           : 強制レポート作成 (解析スキップ)"
     Write-Host "  -Setup            : 環境構築のみ実行"
     Write-Host "  -All              : Setup時に全環境(CPU/GPU)を作成"
     Write-Host "  -Thresh           : タグ確信度閾値 (0.35)"
@@ -146,6 +147,8 @@ if ($Help) { Show-Help; exit }
 #region Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "embed_tags_universal.py"
+$ReportScript = Join-Path $ScriptDir "make_report.py"
+$LogFile = Join-Path (Get-Location) "report_log.json"
 
 # OS Check
 $IsWindows = $true
@@ -221,7 +224,6 @@ if ($Setup) {
         
         if ($IsWindows) { 
             $Py = Prepare-Environment -UseGpu $true
-            # 2回目は生成済みだが、念のため呼んでも無害
             & $Py $PythonScript --gen-config 
         }
     } else {
@@ -242,7 +244,7 @@ if ($Mode -ne "server") {
     Write-Host "[INFO] モード: $Mode"
 }
 
-# 3. ExifTool Check (Serverモードならチェックしない)
+# ExifTool Check (Serverモードならチェックしない)
 if ($Mode -ne "server") {
     if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
         if ($IsWindows) {
@@ -256,11 +258,22 @@ if ($Mode -ne "server") {
 # Prepare Env
 $VenvPython = Prepare-Environment -UseGpu $Gpu
 
-# 4. Build Arguments
-$PyArgs = @($PythonScript, "--mode", $Mode)
+# ★ ReportOnlyモード判定
+if ($Report) {
+    # 強制レポートモード: 解析をスキップして make_report.py だけ走らせる
+    if (Test-Path $LogFile) {
+        Write-Host "`n[INFO] 既存ログからレポートを作成中..." -ForegroundColor Cyan
+        & $VenvPython $ReportScript
+    } else {
+        Write-Host "[WARN] レポートログ ($LogFile) が見つからぬ。まずは通常実行してログを作るのじゃ。" -ForegroundColor Red
+    }
+    exit
+}
 
-# Report Mode: Save log in Python
-if ($Report) { $PyArgs += "--save-report" }
+# --- 通常の解析処理 ---
+
+# Build Arguments
+$PyArgs = @($PythonScript, "--mode", $Mode, "--save-report") # ★常にレポート用ログを保存させる
 
 if ($Mode -eq "server") {
     if ($Port) { $PyArgs += ("--port", $Port) }
@@ -297,10 +310,12 @@ else {
 Write-Host "[INFO] Pythonスクリプトを開始 ($Mode)..." -ForegroundColor Green
 & $VenvPython @PyArgs
 
-# Report generation step
-if ($Report) {
+# ★ 自動レポート生成 (ログがあれば)
+if (Test-Path $LogFile) {
     Write-Host "`n[INFO] レポートHTMLを作成中..." -ForegroundColor Cyan
-    $ReportScript = Join-Path $ScriptDir "make_report.py"
     & $VenvPython $ReportScript
+    # 削除は make_report.py 側で行うため、ここでは呼ばなくてよい
 }
+
+echo "[INFO] Done."
 #endregion
