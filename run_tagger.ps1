@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     WD14 Tagger Universal ラッパー (スタンドアロン / サーバー / クライアント)
 
@@ -30,6 +30,12 @@
     強制的に「general (全年齢)」として扱われるようになる。
     ※これを指定すると、既存タグがあっても強制的にAI解析が走るぞ。
     例: 0.5 (確信度50%を超えない限りセンシティブ扱いしない)
+
+.PARAMETER IgnoreSensitive
+    【センシティブ無視】 (スイッチ)
+    これをONにすると、「sensitive (軽度の性的描写)」と判定されたものを
+    強制的に「general (全年齢)」として扱う。
+    「R-15程度なら一般向け」という豪快なそなたのための機能じゃ。
 
 .PARAMETER Server
     【サーバーモード】 (スイッチ)
@@ -68,9 +74,8 @@
     ※タグ付けと同時に整理したい時に使うのじゃ。
 
 .EXAMPLE
-    .\run_tagger.ps1 -Path 'C:\Images' -Gpu -Organize -RatingThresh 0.5
-    GPUを使って C:\Images 内の画像を処理し、
-    確信度0.5を基準にフォルダ分けを行う（それ以下ならgeneralへ）。
+    .\run_tagger.ps1 -Path 'C:\Images' -Gpu -Organize -IgnoreSensitive
+    sensitive判定を無視して general に統合してフォルダ分けする。
 #>
 
 [CmdletBinding()]
@@ -78,6 +83,7 @@ param (
     [string]$Path = "*.webp",
     [float]$Thresh = 0.35,
     [float]$RatingThresh,
+    [switch]$IgnoreSensitive,
     [switch]$Server,
     [switch]$Client,
     [string]$ServerAddr = "localhost",
@@ -93,22 +99,23 @@ param (
 function Show-Help {
     Write-Host "=== WD14 Tagger Universal (日本語ヘルプ) ===" -ForegroundColor Cyan
     Write-Host "使い方:"
-    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize [-RatingThresh 0.5]"
+    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize [-RatingThresh 0.5] [-IgnoreSensitive]"
     Write-Host "  サーバー   : .\run_tagger.ps1 -Server -Gpu"
     Write-Host "  クライアント: .\run_tagger.ps1 -Client -Path 'フォルダパス' -ServerAddr '192.168.x.x'"
     Write-Host ""
     Write-Host "オプション一覧:"
-    Write-Host "  -Path          : 処理する画像やフォルダのパス (既定: *.webp)"
-    Write-Host "  -Gpu           : GPUを使って高速化する"
-    Write-Host "  -Organize      : レーティング(general/sensitive等)別にフォルダ分けする"
-    Write-Host "  -Thresh        : タグ付けの確信度閾値 (既定: 0.35)"
-    Write-Host "  -RatingThresh  : センシティブ判定の閾値。これ以下の確信度はgeneral扱いにする (例: 0.5)"
-    Write-Host "  -Force         : 既存タグがあっても強制的に上書き・再解析する"
-    Write-Host "  -Server        : サーバーモードで起動"
-    Write-Host "  -Client        : クライアントモードで起動"
-    Write-Host "  -ServerAddr    : 接続先サーバーのIPアドレス"
-    Write-Host "  -Port          : 通信ポート (既定: 5000)"
-    Write-Host "  -h, -Help      : このヘルプを表示する"
+    Write-Host "  -Path             : 処理する画像やフォルダのパス (既定: *.webp)"
+    Write-Host "  -Gpu              : GPUを使って高速化する"
+    Write-Host "  -Organize         : レーティング(general/sensitive等)別にフォルダ分けする"
+    Write-Host "  -Thresh           : タグ付けの確信度閾値 (既定: 0.35)"
+    Write-Host "  -RatingThresh     : センシティブ判定の閾値。これ以下の確信度はgeneral扱いにする (例: 0.5)"
+    Write-Host "  -IgnoreSensitive  : sensitive(R-15)をgeneral(全年齢)として扱う"
+    Write-Host "  -Force            : 既存タグがあっても強制的に上書き・再解析する"
+    Write-Host "  -Server           : サーバーモードで起動"
+    Write-Host "  -Client           : クライアントモードで起動"
+    Write-Host "  -ServerAddr       : 接続先サーバーのIPアドレス"
+    Write-Host "  -Port             : 通信ポート (既定: 5000)"
+    Write-Host "  -h, -Help         : このヘルプを表示する"
     Write-Host ""
 }
 
@@ -191,6 +198,7 @@ else {
     if ($Gpu) { $PyArgs += "--gpu" }
     if ($Force) { $PyArgs += "--force" }
     if ($Organize) { $PyArgs += "--organize" }
+    if ($IgnoreSensitive) { $PyArgs += "--ignore-sensitive" }
     if ($PSBoundParameters.ContainsKey('RatingThresh')) {
         $PyArgs += ("--rating-thresh", $RatingThresh)
     }
