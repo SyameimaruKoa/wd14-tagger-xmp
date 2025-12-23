@@ -52,6 +52,7 @@ REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
 DEFAULT_CONFIG = {
     "server_host": "localhost",
     "server_port": 5000,
+    "client_timeout": 15,
     "sensitive_split_threshold": 0.50,
     "general_threshold": 0.40,
     "folder_names": {
@@ -414,6 +415,7 @@ def process_images(args):
     # 設定値ロード
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
     gen_thresh = APP_CONFIG.get("general_threshold", 0.40)
+    client_timeout = APP_CONFIG.get("client_timeout", 15)
     
     # モデルロード (Standaloneのみ)
     if not is_client:
@@ -423,7 +425,7 @@ def process_images(args):
     # サーバーURL (Clientのみ)
     server_url = f"http://{host}:{port}"
     if is_client:
-        print(f"[INFO] サーバーに接続: {server_url}")
+        print(f"[INFO] サーバーに接続: {server_url} (Timeout: {client_timeout}s)")
 
     # ExifTool起動 (タグ付けが無効でなければ)
     if not args.no_tag:
@@ -521,7 +523,8 @@ def process_images(args):
                         img_data = f.read()
                     req = urllib.request.Request(server_url, data=img_data, method='POST')
                     req.add_header('Content-Type', 'application/octet-stream')
-                    with urllib.request.urlopen(req) as res:
+                    
+                    with urllib.request.urlopen(req, timeout=client_timeout) as res:
                         if res.status != 200:
                             tqdm.write(f"Server Error: {res.status}")
                             continue
@@ -581,8 +584,8 @@ def process_images(args):
                     "probs": probs[:4].tolist()
                 })
 
-        except urllib.error.URLError as e:
-            tqdm.write(f"接続エラー: {e}")
+        except (urllib.error.URLError, socket.timeout) as e:
+            tqdm.write(f"接続エラー(タイムアウト含む): {e}")
             break
         except KeyboardInterrupt:
             print("\n[INFO] 中断されました。")
