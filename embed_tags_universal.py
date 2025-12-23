@@ -307,7 +307,11 @@ def collect_images(path_args, recursive=True):
     return sorted(list(set(collected)))
 
 def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive, fname_disp=""):
-    rating_probs = probs[:4]
+    """
+    推論結果(probs)からレーティングを決定し、ログを出力する。
+    ★修正: NSFW合計値で閾値判定を行う★
+    """
+    rating_probs = probs[:4] # Gen, Sen, Que, Exp
     
     def fmt_prob(p):
         val = p * 100
@@ -323,24 +327,32 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
         tqdm.write(f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} Sen:{b_sen}{fmt_prob(rating_probs[1])} Que:{b_que}{fmt_prob(rating_probs[2])} Exp:{b_exp}{fmt_prob(rating_probs[3])}")
 
     if rating_thresh is not None:
-        nsfw_probs = rating_probs[1:]
-        max_nsfw_idx = np.argmax(nsfw_probs)
-        max_nsfw_prob = nsfw_probs[max_nsfw_idx]
-        if max_nsfw_prob > rating_thresh:
-            rating_idx = max_nsfw_idx + 1
+        # NSFWカテゴリ(1:Sensitive, 2:Questionable, 3:Explicit)の合計を計算
+        nsfw_sum = np.sum(rating_probs[1:])
+        
+        # 合計が閾値を超えているならNSFW扱い
+        if nsfw_sum > rating_thresh:
+            # NSFWの中で最も高いものを選ぶ
+            nsfw_probs = rating_probs[1:]
+            max_nsfw_idx = np.argmax(nsfw_probs)
+            rating_idx = max_nsfw_idx + 1 # +1 to offset General (0)
         else:
+            # 閾値を超えていないならGeneral
             rating_idx = 0
     else:
+        # 閾値指定がない場合は単純に最大値を選ぶ (標準動作)
         rating_idx = np.argmax(rating_probs)
     
     rating = tags[rating_idx]
 
+    # Sensitive細分化 (Configの閾値)
     if rating == 'sensitive':
         if rating_probs[1] < split_thresh:
             rating = 'sensitive_mild'
         else:
             rating = 'sensitive_high'
     
+    # Ignore Sensitive (Configまたは引数)
     if (rating == 'sensitive' or rating == 'sensitive_mild' or rating == 'sensitive_high') and ignore_sensitive:
         rating = 'general'
 
@@ -469,7 +481,6 @@ def run_client(target_files, host, port, thresh, force, args):
                     organized_count += 1
                     final_path = new_path
             
-            # レポートログ保存
             if args.save_report and probs is not None:
                 REPORT_DATA.append({
                     "path": os.path.abspath(final_path),
@@ -530,7 +541,6 @@ def main():
         files = collect_images(args.images, recursive=use_recursive)
         run_client(files, args.host, args.port, args.thresh, args.force, args)
     else:
-        # Standalone
         if not args.images:
             parser.print_help()
             return
@@ -595,7 +605,7 @@ def main():
                 if args.organize and rating:
                     moved, new_path = organize_file(img_path, rating)
                     if moved: 
-                        organized += 1
+                        organized_count += 1
                         final_path = new_path
                 
                 if args.save_report and probs is not None:
@@ -606,7 +616,6 @@ def main():
                     })
 
             except KeyboardInterrupt:
-                print("\n[INFO] Stopping...")
                 et_wrapper.stop()
                 sys.exit(0)
             except Exception as e:
