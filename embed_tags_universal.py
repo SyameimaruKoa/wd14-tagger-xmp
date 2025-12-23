@@ -43,7 +43,6 @@ RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 # ==========================================
 # ★ コンフィグ管理 (config.json) ★
 # ==========================================
-# スクリプト自身のディレクトリを取得し、そこに config.json を置く
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
@@ -91,6 +90,22 @@ def load_config():
 
 # グローバル設定として保持
 APP_CONFIG = load_config()
+
+# ★ ANSIカラー定義 ★
+class Colors:
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    MAGENTA = '\033[35m'
+    RED = '\033[31m'
+    GREY = '\033[90m' # 暗い灰色（空のバー用）
+    RESET = '\033[0m'
+
+def get_bar(prob, color, width=5):
+    """確率に応じたカラーバーを生成する"""
+    fill_len = int(prob * width)
+    empty_len = width - fill_len
+    # 色付きブロック + 灰色ブロック + リセット
+    return f"{color}{'█' * fill_len}{Colors.GREY}{'░' * empty_len}{Colors.RESET}"
 
 class ExifToolWrapper:
     def __init__(self, cmd=EXIFTOOL_CMD):
@@ -325,7 +340,17 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
         return f"{val:04.1f}%"
 
     if fname_disp:
-        tqdm.write(f"[{fname_disp}] Gen:{fmt_prob(rating_probs[0])} Sen:{fmt_prob(rating_probs[1])} Que:{fmt_prob(rating_probs[2])} Exp:{fmt_prob(rating_probs[3])}")
+        # Gen:Green, Sen:Yellow, Que:Magenta, Exp:Red
+        b_gen = get_bar(rating_probs[0], Colors.GREEN)
+        b_sen = get_bar(rating_probs[1], Colors.YELLOW)
+        b_que = get_bar(rating_probs[2], Colors.MAGENTA)
+        b_exp = get_bar(rating_probs[3], Colors.RED)
+
+        tqdm.write(f"[{fname_disp}] "
+                   f"Gen:{b_gen} {fmt_prob(rating_probs[0])} "
+                   f"Sen:{b_sen} {fmt_prob(rating_probs[1])} "
+                   f"Que:{b_que} {fmt_prob(rating_probs[2])} "
+                   f"Exp:{b_exp} {fmt_prob(rating_probs[3])}")
 
     if rating_thresh is not None:
         nsfw_probs = rating_probs[1:]
@@ -514,6 +539,10 @@ def main():
     parser.add_argument("--gen-config", action="store_true", help="Generate config.json and exit")
     
     args = parser.parse_args()
+
+    # Windowsのコマンドプロンプト用にANSIエスケープシーケンスを有効化
+    if IS_WINDOWS:
+        os.system('')
 
     if args.gen_config:
         sys.exit(0)
