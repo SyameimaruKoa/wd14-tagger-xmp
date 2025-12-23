@@ -21,13 +21,24 @@ SETUP_ALL=0
 
 declare -a TARGET_FILES=()
 
-# (show_help 関数は前回と同じなので省略)
 show_help() {
     echo "Usage: ./run_tagger.sh [OPTIONS] [PATH...]"
-    # ... (省略) ...
+    echo ""
+    echo "Modes:"
+    echo "  --server            Start GPU Server mode"
+    echo "  --client            Start Client mode"
+    echo ""
+    echo "Options:"
+    echo "  -g, --gpu           Use GPU (Auto-detect)"
+    echo "  -p, --path <path>   Target file/folder"
+    echo "  -H, --host <ip>     Server IP"
+    echo "  --organize          Move files to folders based on rating"
+    echo "  --rating-thresh <v> Min confidence for sensitive/questionable/explicit"
+    echo "  -f, --force         Force overwrite tags"
+    echo "  -h, --help          Show help"
+    echo ""
 }
 
-# (引数解析部分は前回と同じ)
 while [[ $# -gt 0 ]]; do
     case $1 in
         --setup) SETUP_MODE=1; shift ;;
