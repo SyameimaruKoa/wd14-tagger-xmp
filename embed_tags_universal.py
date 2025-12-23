@@ -11,6 +11,7 @@ import platform
 import json
 import io
 import socket
+import time
 import onnxruntime as ort
 from PIL import Image
 from huggingface_hub import hf_hub_download
@@ -29,7 +30,11 @@ IS_LINUX = (SYSTEM_OS == 'Linux')
 
 if IS_WINDOWS:
     EXIFTOOL_CMD = "exiftool"
-    FS_ENCODING = 'cp932' 
+    # Windows typically uses cp932 for subprocess pipes usually, or utf-8 if configured.
+    # ExifTool -stay_open usually works best with utf-8 if -charset filename=utf8 is passed,
+    # but for simplicity/compatibility we try standard encoding handling.
+    # We will use binary mode for pipes to avoid encoding issues with newlines.
+    FS_ENCODING = 'utf-8' 
 else:
     EXIFTOOL_CMD = "exiftool"
     FS_ENCODING = 'utf-8'
@@ -38,6 +43,118 @@ VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 
 # WD14 Rating Tags (Indices 0-3)
 RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
+
+class ExifToolWrapper:
+    def __init__(self, cmd=EXIFTOOL_CMD):
+        self.cmd = cmd
+        self.process = None
+        self.running = False
+
+    def start(self):
+        if self.running: return
+        try:
+            # -stay_open True -@ -  allows sending commands via stdin
+            # -common_args can be put here if needed, but we do per-command
+            startupinfo = None
+            if IS_WINDOWS:
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            
+            self.process = subprocess.Popen(
+                [self.cmd, "-stay_open", "True", "-@", "-", "-common_args", "-charset", "filename=utf8"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, # Discard stderr or handle it
+                startupinfo=startupinfo
+            )
+            self.running = True
+            # print("[INFO] ExifTool process started.")
+        except Exception as e:
+            print(f"[ERROR] Failed to start ExifTool: {e}")
+            self.running = False
+
+    def stop(self):
+        if not self.running: return
+        try:
+            self.process.stdin.write(b"-stay_open\nFalse\n")
+            self.process.stdin.flush()
+            self.process.wait(timeout=2)
+        except Exception:
+            if self.process:
+                self.process.kill()
+        self.running = False
+
+    def execute(self, args):
+        """
+        Executes a command and returns the stdout output.
+        args: list of arguments (strings)
+        """
+        if not self.running:
+            self.start()
+            if not self.running: return ""
+
+        try:
+            # Send args
+            for arg in args:
+                self.process.stdin.write(arg.encode('utf-8') + b"\n")
+            
+            # Execute command
+            self.process.stdin.write(b"-execute\n")
+            self.process.stdin.flush()
+
+            # Read output until {ready}
+            output_lines = []
+            while True:
+                line = self.process.stdout.readline()
+                if not line: break # Process died
+                line_str = line.decode('utf-8', errors='ignore').strip()
+                if line_str == "{ready}":
+                    break
+                output_lines.append(line_str)
+            
+            return "\n".join(output_lines)
+
+        except Exception as e:
+            print(f"[Error] ExifTool communication: {e}")
+            self.stop()
+            return ""
+
+    def get_tags(self, path):
+        # -s3 : value only
+        # -sep ", " : separate list items
+        # -XMP:Subject
+        res = self.execute(["-XMP:Subject", "-s3", "-sep", ", ", "-fast", path])
+        if res:
+            return [t.strip() for t in res.split(',')]
+        return []
+
+    def write_tags(self, path, tags):
+        if not tags: return False
+        tags_str = ", ".join(tags)
+        
+        # ExifTool wrapper handles file locking better than rapid subprocess spawning,
+        # but temp file approach is still safer for atomic writes.
+        # However, for speed in batch, direct overwrite is faster.
+        # Let's try direct overwrite with -overwrite_original
+        
+        # Arguments
+        # -overwrite_original
+        # -P (Preserve attributes)
+        # -m (Ignore minor errors)
+        # -sep ", "
+        # -XMP:Subject=...
+        
+        res = self.execute([
+            "-overwrite_original", "-P", "-m", "-sep", ", ",
+            f"-XMP:Subject={tags_str}",
+            path
+        ])
+        
+        # Check success? ExifTool usually outputs "1 image files updated"
+        return "image files updated" in res
+
+# Global instance
+et_wrapper = ExifToolWrapper()
 
 def get_ip_addresses():
     ips = []
@@ -115,70 +232,6 @@ def preprocess(image, size=448):
     img_np = img_np[:, :, ::-1]
     img_np = np.expand_dims(img_np, 0)
     return img_np
-
-def get_xmp_tags(image_path):
-    """Reads XMP:Subject tags from the image."""
-    try:
-        cmd = [EXIFTOOL_CMD, "-XMP:Subject", "-s3", "-sep", ", ", "-fast", image_path]
-        startupinfo = None
-        if IS_WINDOWS:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding=FS_ENCODING, errors='ignore', startupinfo=startupinfo
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return [t.strip() for t in result.stdout.strip().split(',')]
-        return []
-    except Exception:
-        return []
-
-def has_xmp_tags(image_path):
-    """Checks if XMP tags exist (fast check)."""
-    tags = get_xmp_tags(image_path)
-    return len(tags) > 0
-
-def write_xmp_passthrough_safe(image_path, tags_list):
-    if not tags_list: return False
-    tags_str = ", ".join(tags_list)
-    abs_path = os.path.abspath(image_path)
-    dir_name = os.path.dirname(abs_path)
-    _, ext = os.path.splitext(abs_path)
-    temp_name = f"temp_{uuid.uuid4().hex}{ext}"
-    temp_path = os.path.join(dir_name, temp_name)
-    success = False
-
-    try:
-        os.rename(abs_path, temp_path)
-        cmd = [
-            EXIFTOOL_CMD, "-overwrite_original", "-P", "-m", "-sep", ", ", 
-            f"-XMP:Subject={tags_str}", temp_path 
-        ]
-        startupinfo = None
-        if IS_WINDOWS:
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, encoding=FS_ENCODING, errors='ignore', startupinfo=startupinfo
-        )
-        if result.returncode != 0:
-            tqdm.write(f"ExifTool Error ({os.path.basename(image_path)}): {result.stderr.strip()}")
-        else:
-            success = True
-    except OSError as e:
-        tqdm.write(f"Rename Error: {e}")
-        return False
-    except Exception as e:
-        tqdm.write(f"Error: {e}")
-        return False
-    finally:
-        if os.path.exists(temp_path):
-            try:
-                os.rename(temp_path, abs_path)
-            except OSError:
-                tqdm.write(f"CRITICAL: Failed to restore {temp_path}")
-                success = False
-    return success
 
 def organize_file(file_path, rating):
     """Moves the file to a subfolder based on rating."""
@@ -271,6 +324,8 @@ def run_client(target_files, host, port, thresh, force):
     url = f"http://{host}:{port}"
     print(f"[INFO] Connecting to Server: {url}")
     
+    et_wrapper.start() # Start ExifTool
+
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
     tags = []
@@ -286,7 +341,7 @@ def run_client(target_files, host, port, thresh, force):
     for img_path in pbar:
         try:
             if not force:
-                if has_xmp_tags(img_path):
+                if et_wrapper.get_tags(img_path): # Check tags with wrapper
                     skipped_count += 1
                     continue
             with open(img_path, 'rb') as f:
@@ -304,17 +359,19 @@ def run_client(target_files, host, port, thresh, force):
                 if p > thresh:
                     detected_tags.append(tags[i])
             if detected_tags:
-                if write_xmp_passthrough_safe(img_path, detected_tags):
+                if et_wrapper.write_tags(img_path, detected_tags): # Write with wrapper
                     processed_count += 1
         except urllib.error.URLError as e:
             tqdm.write(f"Connection Error: {e}")
             break
         except KeyboardInterrupt:
             print("\nAborted.")
+            et_wrapper.stop()
             sys.exit(0)
         except Exception as e:
             tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
-            
+    
+    et_wrapper.stop()
     print(f"\n[Done] Processed: {processed_count}, Skipped: {skipped_count}")
 
 def main():
@@ -349,6 +406,8 @@ def main():
             return
         print("Loading model...")
         init_global_model(args.gpu)
+        et_wrapper.start() # Start ExifTool resident process
+        
         processed = 0
         skipped = 0
         organized = 0
@@ -359,9 +418,8 @@ def main():
                 rating = None
                 existing_tags = []
                 
-                # Check for existing tags
-                if has_xmp_tags(img_path):
-                    existing_tags = get_xmp_tags(img_path)
+                # Check for existing tags (Fast via Resident ExifTool)
+                existing_tags = et_wrapper.get_tags(img_path)
                 
                 need_inference = True
                 
@@ -375,8 +433,6 @@ def main():
                         found_ratings = [t for t in existing_tags if t in RATING_TAGS]
                         if found_ratings:
                             rating = found_ratings[0]
-                            # If we found 'sensitive' but we want to ignore it, logic is applied later.
-                            # But we have the string now, so we don't need inference.
                             need_inference = False
                         else:
                             # Organize requested but no rating tag -> Must infer
@@ -393,12 +449,11 @@ def main():
                     img_input = preprocess(pil_image)
                     probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
                     
-                    # Determine Rating (First 4 outputs)
+                    # Determine Rating
                     rating_probs = probs[:4]
                     
                     if args.rating_thresh is not None:
-                        # Custom threshold logic
-                        nsfw_probs = rating_probs[1:] # sensitive, questionable, explicit
+                        nsfw_probs = rating_probs[1:]
                         max_nsfw_idx = np.argmax(nsfw_probs)
                         max_nsfw_prob = nsfw_probs[max_nsfw_idx]
                         
@@ -411,25 +466,26 @@ def main():
                     
                     rating = tags_global[rating_idx]
 
-                    # Collect tags above threshold
+                    # Collect tags
                     for i, p in enumerate(probs):
                         if p > args.thresh:
                             detected_tags.append(tags_global[i])
                     
-                    # Write tags only if force or no tags
+                    # Write tags
                     should_write = False
                     if not existing_tags: should_write = True
                     if args.force: should_write = True
                     
                     if should_write and detected_tags:
-                        if write_xmp_passthrough_safe(img_path, detected_tags):
+                        # Write via Resident ExifTool
+                        if et_wrapper.write_tags(img_path, detected_tags):
                             processed += 1
                     elif not should_write:
                         skipped += 1
                 else:
                     skipped += 1
                 
-                # Apply Ignore Sensitive logic (whether from inference or existing tags)
+                # Apply Ignore Sensitive logic
                 if rating == 'sensitive' and args.ignore_sensitive:
                     rating = 'general'
 
@@ -439,10 +495,13 @@ def main():
                         organized += 1
 
             except KeyboardInterrupt:
+                print("\n[INFO] Stopping...")
+                et_wrapper.stop()
                 sys.exit(0)
             except Exception as e:
                 tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
         
+        et_wrapper.stop()
         print(f"\n[Done] Processed (Tagged): {processed}, Skipped: {skipped}, Organized: {organized}")
 
 if __name__ == "__main__":
