@@ -30,10 +30,6 @@ IS_LINUX = (SYSTEM_OS == 'Linux')
 
 if IS_WINDOWS:
     EXIFTOOL_CMD = "exiftool"
-    # Windows typically uses cp932 for subprocess pipes usually, or utf-8 if configured.
-    # ExifTool -stay_open usually works best with utf-8 if -charset filename=utf8 is passed,
-    # but for simplicity/compatibility we try standard encoding handling.
-    # We will use binary mode for pipes to avoid encoding issues with newlines.
     FS_ENCODING = 'utf-8' 
 else:
     EXIFTOOL_CMD = "exiftool"
@@ -53,8 +49,6 @@ class ExifToolWrapper:
     def start(self):
         if self.running: return
         try:
-            # -stay_open True -@ -  allows sending commands via stdin
-            # -common_args can be put here if needed, but we do per-command
             startupinfo = None
             if IS_WINDOWS:
                 startupinfo = subprocess.STARTUPINFO()
@@ -64,11 +58,10 @@ class ExifToolWrapper:
                 [self.cmd, "-stay_open", "True", "-@", "-", "-common_args", "-charset", "filename=utf8"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, # Discard stderr or handle it
+                stderr=subprocess.PIPE, 
                 startupinfo=startupinfo
             )
             self.running = True
-            # print("[INFO] ExifTool process started.")
         except Exception as e:
             print(f"[ERROR] Failed to start ExifTool: {e}")
             self.running = False
@@ -85,28 +78,21 @@ class ExifToolWrapper:
         self.running = False
 
     def execute(self, args):
-        """
-        Executes a command and returns the stdout output.
-        args: list of arguments (strings)
-        """
         if not self.running:
             self.start()
             if not self.running: return ""
 
         try:
-            # Send args
             for arg in args:
                 self.process.stdin.write(arg.encode('utf-8') + b"\n")
             
-            # Execute command
             self.process.stdin.write(b"-execute\n")
             self.process.stdin.flush()
 
-            # Read output until {ready}
             output_lines = []
             while True:
                 line = self.process.stdout.readline()
-                if not line: break # Process died
+                if not line: break 
                 line_str = line.decode('utf-8', errors='ignore').strip()
                 if line_str == "{ready}":
                     break
@@ -120,9 +106,6 @@ class ExifToolWrapper:
             return ""
 
     def get_tags(self, path):
-        # -s3 : value only
-        # -sep ", " : separate list items
-        # -XMP:Subject
         res = self.execute(["-XMP:Subject", "-s3", "-sep", ", ", "-fast", path])
         if res:
             return [t.strip() for t in res.split(',')]
@@ -132,28 +115,13 @@ class ExifToolWrapper:
         if not tags: return False
         tags_str = ", ".join(tags)
         
-        # ExifTool wrapper handles file locking better than rapid subprocess spawning,
-        # but temp file approach is still safer for atomic writes.
-        # However, for speed in batch, direct overwrite is faster.
-        # Let's try direct overwrite with -overwrite_original
-        
-        # Arguments
-        # -overwrite_original
-        # -P (Preserve attributes)
-        # -m (Ignore minor errors)
-        # -sep ", "
-        # -XMP:Subject=...
-        
         res = self.execute([
             "-overwrite_original", "-P", "-m", "-sep", ", ",
             f"-XMP:Subject={tags_str}",
             path
         ])
-        
-        # Check success? ExifTool usually outputs "1 image files updated"
         return "image files updated" in res
 
-# Global instance
 et_wrapper = ExifToolWrapper()
 
 def get_ip_addresses():
@@ -242,13 +210,29 @@ def organize_file(file_path, rating):
         abs_path = os.path.abspath(file_path)
         dir_name = os.path.dirname(abs_path)
         file_name = os.path.basename(abs_path)
+        parent_dir_name = os.path.basename(dir_name)
+
+        # 1. 既に正しいフォルダにいるなら移動しない
+        if parent_dir_name == rating:
+            return False
         
-        target_dir = os.path.join(dir_name, rating)
+        # 2. 別のレーティングフォルダ(sensitive等)にいる場合、一つ上の階層を基準にする
+        if parent_dir_name in RATING_TAGS:
+            base_dir = os.path.dirname(dir_name)
+        else:
+            # 3. 未整理のフォルダにいる場合、そのままそこを基準にする
+            base_dir = dir_name
+
+        target_dir = os.path.join(base_dir, rating)
         os.makedirs(target_dir, exist_ok=True)
         
         target_path = os.path.join(target_dir, file_name)
         
-        # Avoid overwrite collision
+        # 移動先が自分自身なら何もしない
+        if os.path.abspath(target_path) == abs_path:
+            return False
+
+        # ファイル名重複回避
         if os.path.exists(target_path):
             base, ext = os.path.splitext(file_name)
             target_path = os.path.join(target_dir, f"{base}_{uuid.uuid4().hex[:6]}{ext}")
@@ -324,7 +308,7 @@ def run_client(target_files, host, port, thresh, force):
     url = f"http://{host}:{port}"
     print(f"[INFO] Connecting to Server: {url}")
     
-    et_wrapper.start() # Start ExifTool
+    et_wrapper.start()
 
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
@@ -341,7 +325,7 @@ def run_client(target_files, host, port, thresh, force):
     for img_path in pbar:
         try:
             if not force:
-                if et_wrapper.get_tags(img_path): # Check tags with wrapper
+                if et_wrapper.get_tags(img_path):
                     skipped_count += 1
                     continue
             with open(img_path, 'rb') as f:
@@ -359,7 +343,7 @@ def run_client(target_files, host, port, thresh, force):
                 if p > thresh:
                     detected_tags.append(tags[i])
             if detected_tags:
-                if et_wrapper.write_tags(img_path, detected_tags): # Write with wrapper
+                if et_wrapper.write_tags(img_path, detected_tags):
                     processed_count += 1
         except urllib.error.URLError as e:
             tqdm.write(f"Connection Error: {e}")
@@ -406,7 +390,7 @@ def main():
             return
         print("Loading model...")
         init_global_model(args.gpu)
-        et_wrapper.start() # Start ExifTool resident process
+        et_wrapper.start()
         
         processed = 0
         skipped = 0
@@ -418,27 +402,20 @@ def main():
                 rating = None
                 existing_tags = []
                 
-                # Check for existing tags (Fast via Resident ExifTool)
                 existing_tags = et_wrapper.get_tags(img_path)
                 
                 need_inference = True
                 
                 if existing_tags and not args.force:
-                    # 1. rating_thresh is set -> Must infer
                     if args.rating_thresh is not None:
                         need_inference = True
-                    
-                    # 2. Organizing? Try to use existing rating tag
                     elif args.organize:
                         found_ratings = [t for t in existing_tags if t in RATING_TAGS]
                         if found_ratings:
                             rating = found_ratings[0]
                             need_inference = False
                         else:
-                            # Organize requested but no rating tag -> Must infer
                             need_inference = True
-                    
-                    # 3. Just tagging, tags exist -> Skip
                     else:
                         need_inference = False
                 
@@ -449,7 +426,6 @@ def main():
                     img_input = preprocess(pil_image)
                     probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
                     
-                    # Determine Rating
                     rating_probs = probs[:4]
                     
                     if args.rating_thresh is not None:
@@ -466,18 +442,15 @@ def main():
                     
                     rating = tags_global[rating_idx]
 
-                    # Collect tags
                     for i, p in enumerate(probs):
                         if p > args.thresh:
                             detected_tags.append(tags_global[i])
                     
-                    # Write tags
                     should_write = False
                     if not existing_tags: should_write = True
                     if args.force: should_write = True
                     
                     if should_write and detected_tags:
-                        # Write via Resident ExifTool
                         if et_wrapper.write_tags(img_path, detected_tags):
                             processed += 1
                     elif not should_write:
@@ -485,11 +458,9 @@ def main():
                 else:
                     skipped += 1
                 
-                # Apply Ignore Sensitive logic
                 if rating == 'sensitive' and args.ignore_sensitive:
                     rating = 'general'
 
-                # Organize
                 if args.organize and rating:
                     if organize_file(img_path, rating):
                         organized += 1
