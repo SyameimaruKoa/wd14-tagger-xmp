@@ -1,17 +1,15 @@
 import json
 import os
-from urllib.parse import quote
 
 # スクリプトの場所を基準にする
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-# レポートログはカレントディレクトリから読む
+# レポートログはカレントディレクトリから読む（run_taggerの実行場所に依存）
 REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 
 def load_config():
     """config.jsonを読み込む"""
     if not os.path.exists(CONFIG_FILE):
-        print(f"[ERROR] Config file not found: {CONFIG_FILE}")
         return None
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -87,17 +85,19 @@ CARD_TEMPLATE = """
 
 def make_report():
     if not os.path.exists(REPORT_LOG_FILE):
-        print("[WARN] No report log found. Run tagger first.")
+        # ログがない場合は静かに終了（呼び出し元で制御済みを想定）
         return
 
     config = load_config()
-    if config is None:
+    folder_mapping = {}
+    if config:
+        folder_mapping = config.get("folder_names", {})
+
+    try:
+        with open(REPORT_LOG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
         return
-
-    folder_mapping = config.get("folder_names", {})
-
-    with open(REPORT_LOG_FILE, 'r', encoding='utf-8') as f:
-        data = json.load(f)
     
     grouped = {}
     for item in data:
@@ -134,14 +134,16 @@ def make_report():
             f.write(final_html)
         
         generated_files.append(html_filename)
-        print(f"[INFO] Report generated: {html_filename}")
+        print(f"[INFO] レポート作成: {html_filename}")
 
-    # ★ ログファイルの削除 ★
+    # ログファイルの削除
     try:
         os.remove(REPORT_LOG_FILE)
-        # print(f"[INFO] Deleted log file: {REPORT_LOG_FILE}")
-    except OSError as e:
-        print(f"[WARN] Failed to delete log file: {e}")
+    except OSError:
+        pass
 
 if __name__ == "__main__":
-    make_report()
+    if not os.path.exists(REPORT_LOG_FILE):
+        print("[WARN] report_log.json が見つかりません。")
+    else:
+        make_report()

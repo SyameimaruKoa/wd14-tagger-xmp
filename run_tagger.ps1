@@ -1,168 +1,128 @@
 ﻿<#
 .SYNOPSIS
-    WD14 Tagger Universal Wrapper (Standalone / Server / Client)
+    WD14 Tagger Universal Wrapper (日本語版)
 
 .DESCRIPTION
     画像認識AI (WD14 Tagger) を使用して画像のタグ付けや整理を行うスクリプトじゃ。
-    以下の3つのモードで動作するぞ。
-    1. スタンドアロン (通常): その場で画像を読み込んで処理する。
-    2. サーバー: GPUを使って待機し、送られてきた画像を処理する。
-    3. クライアント: 別のPC（サーバー）に画像を投げて処理してもらう。
+    引数なしで実行すると「環境構築モード」として動作し、セットアップのみを行って終了する。
+    事故防止のため、処理を行いたい場合は必ず -Path などを指定するのじゃ。
+
+    【主な実行モード】
+    1. Standalone (通常): その場で画像を処理する。
+    2. Server: GPU推論サーバーとして待機する。
+    3. Client: サーバーに画像を投げる。
 
 .PARAMETER Path
     【対象パス】 (文字列)
-    処理対象のファイルパス、またはフォルダパスを指定する。
-    ワイルドカードも使用可能じゃ。
-    例: 'C:\Images' や '*.png' など。
-    デフォルト: "*.webp"
+    処理対象の画像ファイル、またはフォルダパス。
+    指定するとタグ付け処理が開始される。
 
-.PARAMETER Thresh
-    【タグ確信度閾値】 (0.0〜1.0)
-    タグとして採用するための最低ラインじゃ。
-    AIが「このタグである確率」がこの値を超えたものだけが書き込まれる。
-    値を上げると精度は上がるがタグ数は減る。
-    デフォルト: 0.35
+.PARAMETER Organize
+    【整理モード】 (スイッチ)
+    タグ付けを行わず、フォルダ振り分けのみを行うモードじゃ。
+    ※同時に -Tag を指定しない限り、タグ付けは行われない。
+    ※このモードでは、デフォルトで「直下のファイルのみ」が対象になる（再帰OFF）。
 
-.PARAMETER RatingThresh
-    【レーティング判定閾値】 (0.0〜1.0)
-    これを指定すると、センシティブ判定の基準を厳しくできる。
-    「sensitive」「questionable」「explicit」の確信度がこの値を超えない限り、
-    強制的に「general (全年齢)」として扱われるようになる。
-    ※これを指定すると、既存タグがあっても強制的にAI解析が走るぞ。
-    例: 0.5 (確信度50%を超えない限りセンシティブ扱いしない)
+.PARAMETER Tag
+    【タグ付け有効化】 (スイッチ)
+    -Organize と併用する際に、「整理もしつつタグ付けもしたい」場合に指定する。
+    通常モード(-Pathのみ)ではデフォルトでONになっているので指定不要じゃ。
 
-.PARAMETER IgnoreSensitive
-    【センシティブ無視】 (スイッチ)
-    これをONにすると、「sensitive (軽度の性的描写)」と判定されたものを
-    強制的に「general (全年齢)」として扱う。
-    「R-15程度なら一般向け」という豪快なそなたのための機能じゃ。
+.PARAMETER NoReport
+    【レポートなし】 (スイッチ)
+    HTMLレポートの作成をスキップする。
+    デフォルトでは処理後に必ずレポートが作られる。
 
-.PARAMETER Server
-    【サーバーモード】 (スイッチ)
-    これを付けると推論サーバーとして起動する。
-    入力待ち状態になり、クライアントからのリクエストを処理する。
+.PARAMETER Recursive
+    【再帰検索】 (スイッチ)
+    サブフォルダも検索対象にする。
+    通常モードではデフォルトON、整理モードではデフォルトOFFじゃが、
+    これを指定すると強制的にONになる。
 
-.PARAMETER Client
-    【クライアントモード】 (スイッチ)
-    これを付けるとクライアントとして動作し、
-    指定したサーバーへ画像を送信して処理させる。
-
-.PARAMETER ServerAddr
-    【サーバーアドレス】 (文字列)
-    クライアントモードで接続する先のIPアドレスじゃ。
-    デフォルト: "localhost" (config.jsonで変更可)
-
-.PARAMETER Port
-    【ポート番号】 (整数)
-    サーバーとの通信に使用するポート番号じゃ。
-    デフォルト: 5000 (config.jsonで変更可)
+.PARAMETER NoRecursive
+    【再帰なし】 (スイッチ)
+    サブフォルダを検索しない。
+    通常モードで直下だけ処理したい時に使う。
 
 .PARAMETER Gpu
     【GPU使用】 (スイッチ)
-    ONにすると GPU (DirectML / CUDA / ROCm / OpenVINO) を使用して高速化する。
-    指定しない場合は CPU でのんびり処理する。
+    GPUを使用して高速化する。
 
 .PARAMETER Force
-    【強制上書き】 (スイッチ)
-    ファイルに既にタグ情報 (XMP) が埋め込まれていても、無視して再解析・上書き保存する。
-    指定しない場合、タグ付きファイルはスキップされる（RatingThresh指定時を除く）。
+    【強制実行】 (スイッチ)
+    既存タグがあっても強制的に再解析・上書きする。
 
-.PARAMETER Organize
-    【フォルダ振り分け】 (スイッチ)
-    判定されたレーティングに基づいて、ファイルを自動的にフォルダへ移動させる。
-    移動先: general, sensitive, questionable, explicit
-    ※タグ付けと同時に整理したい時に使うのじゃ。
+.PARAMETER Server
+    【サーバーモード】 (スイッチ)
+    推論サーバーとして起動する。
 
-.PARAMETER Setup
-    【環境構築モード】 (スイッチ)
-    Pythonスクリプトを実行せず、仮想環境の作成とライブラリインストールのみを行う。
-    初回導入時や、ライブラリを更新したい時に使うがよい。
-    ※この時 config.json も生成されるぞ。
+.PARAMETER Client
+    【クライアントモード】 (スイッチ)
+    クライアントとして動作し、指定したサーバーへ画像を送信する。
 
-.PARAMETER All
-    【全環境作成】 (スイッチ)
-    -Setup と組み合わせて使う。
-    CPU環境(venv_std)とGPU環境(venv_gpu)の両方をまとめて作成・更新する。
+.PARAMETER Host
+    サーバーのIPアドレス。
 
-.PARAMETER Report
-    【強制レポート作成】 (スイッチ)
-    解析処理(Python)をスキップし、既存のログファイル(report_log.json)からHTMLレポートのみを生成する。
-    ※通常は解析後に自動でレポートが作られるため、このオプションは不要じゃ。
-    手動でレポートだけ作り直したい時専用じゃ。
+.PARAMETER Port
+    ポート番号。
 
 .EXAMPLE
-    .\run_tagger.ps1 -Setup -All
-    CPU用とGPU用の仮想環境を両方作成し、config.jsonを生成して終了する。
+    # 初回セットアップ (何もしない)
+    .\run_tagger.ps1
+
+    # 通常実行 (タグ付け＋レポート)
+    .\run_tagger.ps1 -Path "C:\Images" -Gpu
+
+    # フォルダ整理のみ (タグ付けなし)
+    .\run_tagger.ps1 -Path "C:\Images" -Organize
+
+    # 全部入り (タグ付け＋整理＋レポート)
+    .\run_tagger.ps1 -Path "C:\Images" -Tag -Organize -Gpu
 #>
 
 [CmdletBinding()]
 param (
-    [string]$Path = "*.webp",
+    [string]$Path,
+    [switch]$Organize,
+    [switch]$Tag,
+    [switch]$NoReport,
+    [switch]$Recursive,
+    [switch]$NoRecursive,
     [float]$Thresh = 0.35,
-    [float]$RatingThresh,
-    [switch]$IgnoreSensitive,
-    [switch]$Server,
-    [switch]$Client,
-    [string]$ServerAddr,
-    [int]$Port,
     [switch]$Gpu,
     [switch]$Force,
-    [switch]$Organize,
-    [switch]$Setup,
-    [switch]$All,
-    [switch]$Report,
+    [switch]$Server,
+    [switch]$Client,
+    [string]$HostIP,
+    [int]$Port,
+    
+    # Old params
+    [float]$RatingThresh,
+    [switch]$IgnoreSensitive,
+    
     [Alias('h')]
     [switch]$Help
 )
 
 #region Help Function
 function Show-Help {
-    Write-Host "=== WD14 Tagger Universal (日本語ヘルプ) ===" -ForegroundColor Cyan
-    Write-Host "使い方:"
-    Write-Host "  通常実行   : .\run_tagger.ps1 -Path 'フォルダパス' -Gpu -Organize"
-    Write-Host "  環境構築   : .\run_tagger.ps1 -Setup [-All] [-Gpu]"
-    Write-Host "  サーバー   : .\run_tagger.ps1 -Server -Gpu"
-    Write-Host "  クライアント: .\run_tagger.ps1 -Client -Path 'フォルダパス'"
-    Write-Host ""
-    Write-Host "オプション一覧:"
-    Write-Host "  -Path             : 処理対象パス (既定: *.webp)"
-    Write-Host "  -Gpu              : GPUを使用"
-    Write-Host "  -Organize         : フォルダ振り分けモード"
-    Write-Host "  -Report           : 強制レポート作成 (解析スキップ)"
-    Write-Host "  -Setup            : 環境構築のみ実行"
-    Write-Host "  -All              : Setup時に全環境(CPU/GPU)を作成"
-    Write-Host "  -Thresh           : タグ確信度閾値 (0.35)"
-    Write-Host "  -RatingThresh     : センシティブ判定閾値 (例: 0.5)"
-    Write-Host "  -IgnoreSensitive  : sensitiveをgeneral扱いにする"
-    Write-Host "  -Force            : 強制再解析"
-    Write-Host "  -Server           : サーバーモード"
-    Write-Host "  -Client           : クライアントモード"
-    Write-Host "  -h, -Help         : ヘルプ表示"
-    Write-Host ""
+    Get-Help $MyInvocation.MyCommand.Path -Detailed
 }
 
 if ($Help) { Show-Help; exit }
 #endregion
 
-#region Configuration
+#region Environment Setup
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "embed_tags_universal.py"
-$ReportScript = Join-Path $ScriptDir "make_report.py"
-$LogFile = Join-Path (Get-Location) "report_log.json"
 
-# OS Check
 $IsWindows = $true
 if ($PSVersionTable.PSVersion.Major -ge 6) {
     if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
 }
-#endregion
 
-#region Environment Setup Function
 function Prepare-Environment {
-    param (
-        [bool]$UseGpu
-    )
-
+    param ([bool]$UseGpu)
     if ($IsWindows -and $UseGpu) {
         $EnvName = "GPU (DirectML)"
         $TargetVenv = Join-Path $ScriptDir "venv_gpu"
@@ -172,16 +132,13 @@ function Prepare-Environment {
         $TargetVenv = Join-Path $ScriptDir "venv_std"
         $Requirements = @("onnxruntime", "pillow", "huggingface_hub", "numpy", "tqdm")
     }
-
-    Write-Host "[INFO] 環境確認: $EnvName ($TargetVenv)" -ForegroundColor Cyan
-
-    # 1. Create venv
+    
+    Write-Host "[INFO] 環境確認: $EnvName" -ForegroundColor Cyan
     if (-not (Test-Path $TargetVenv)) {
         Write-Host "  -> 仮想環境を作成中..." -ForegroundColor Yellow
         if ($IsWindows) { python -m venv $TargetVenv } else { python3 -m venv $TargetVenv }
     }
-
-    # Paths
+    
     if ($IsWindows) {
         $Bin = Join-Path $TargetVenv "Scripts"
         $PyEx = Join-Path $Bin "python.exe"
@@ -192,130 +149,79 @@ function Prepare-Environment {
         $PipEx = Join-Path $Bin "pip"
     }
 
-    # 2. Update Pip (Silence warnings)
-    Write-Host "  -> pipを更新確認中..."
-    & $PyEx -m pip install --upgrade pip | Out-Null
-
-    # 3. Install Requirements
-    $Installed = & $PipEx list
-    $NeedsInstall = $false
+    $Installed = & $PipEx list 2>&1
     foreach ($req in $Requirements) {
-        if ($Installed -notmatch $req) { $NeedsInstall = $true; break }
+        if ($Installed -notmatch $req) {
+            Write-Host "  -> ライブラリインストール: $req" -ForegroundColor Yellow
+            & $PipEx install $req | Out-Null
+        }
     }
-
-    if ($NeedsInstall) {
-        Write-Host "  -> ライブラリをインストール中..." -ForegroundColor Yellow
-        & $PipEx install $Requirements | Out-Null
-    } else {
-        Write-Host "  -> ライブラリは最新じゃ。" -ForegroundColor Gray
-    }
-
     return $PyEx
 }
 #endregion
 
-#region Execution Logic
+#region Main Logic
 
-# Setup Mode
-if ($Setup) {
-    if ($All) {
-        $Py = Prepare-Environment -UseGpu $false
-        & $Py $PythonScript --gen-config # Python側でConfig生成
-        
-        if ($IsWindows) { 
-            $Py = Prepare-Environment -UseGpu $true
-            & $Py $PythonScript --gen-config 
-        }
-    } else {
-        $Py = Prepare-Environment -UseGpu $Gpu
-        & $Py $PythonScript --gen-config
-    }
+# 引数が一つもない場合はセットアップモード
+if ($PSBoundParameters.Count -eq 0) {
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "   WD14 Tagger Universal - Setup Mode" -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "引数が指定されなかったため、環境構築のみを行いました。"
+    Write-Host "画像処理を行うには -Path オプションなどを指定してください。"
+    Write-Host "使い方がわからない場合は -Help を参照するのじゃ。"
     
-    Write-Host "`n[INFO] 環境構築完了じゃ。" -ForegroundColor Green
+    # Config生成のために一度CPU環境で実行
+    $Py = Prepare-Environment -UseGpu $false
+    & $Py $PythonScript --gen-config
     exit
 }
 
-# Normal Execution
-$Mode = "standalone"
-if ($Server) { $Mode = "server" }
-if ($Client) { $Mode = "client" }
-
-if ($Mode -ne "server") {
-    Write-Host "[INFO] モード: $Mode"
-}
-
-# ExifTool Check (Serverモードならチェックしない)
-if ($Mode -ne "server") {
-    if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
-        if ($IsWindows) {
-            if (-not (Test-Path (Join-Path $ScriptDir "exiftool.exe"))) {
-                Write-Host "[WARN] exiftool.exe が見つかりません！タグの書き込みに失敗する可能性があります。" -ForegroundColor Magenta
-            }
-        }
-    }
-}
-
-# Prepare Env
+# 環境準備
 $VenvPython = Prepare-Environment -UseGpu $Gpu
 
-# ★ ReportOnlyモード判定
-if ($Report) {
-    # 強制レポートモード: 解析をスキップして make_report.py だけ走らせる
-    if (Test-Path $LogFile) {
-        Write-Host "`n[INFO] 既存ログからレポートを作成中..." -ForegroundColor Cyan
-        & $VenvPython $ReportScript
-    } else {
-        Write-Host "[WARN] レポートログ ($LogFile) が見つからぬ。まずは通常実行してログを作るのじゃ。" -ForegroundColor Red
-    }
-    exit
+# Python引数構築
+$PyArgs = @($PythonScript)
+
+# モード設定
+if ($Server) { $PyArgs += ("--mode", "server") }
+elseif ($Client) { $PyArgs += ("--mode", "client") }
+else { $PyArgs += ("--mode", "standalone") }
+
+# アクション設定
+# Organize指定時 -> デフォルトでNo-Tag扱いになる。Tag指定があればタグも有効。
+if ($Organize) {
+    $PyArgs += "--organize"
+    if (-not $Tag) { $PyArgs += "--no-tag" }
+} else {
+    # 通常モード -> Tag指定は不要(デフォルトON)。No-Tag指定があれば...無いので実装不要
+    # もし将来的に「タグなし・整理なし・レポートのみ」をするなら --no-tag 引数が必要だが
+    # 今回のPSラッパーでは Organize がスイッチになっているため自動制御する
 }
 
-# --- 通常の解析処理 ---
+if ($NoReport) { $PyArgs += "--no-report" }
 
-# Build Arguments
-$PyArgs = @($PythonScript, "--mode", $Mode, "--save-report") # ★常にレポート用ログを保存させる
+# 再帰設定
+if ($Recursive) { $PyArgs += "--recursive" }
+if ($NoRecursive) { $PyArgs += "--no-recursive" }
 
-if ($Mode -eq "server") {
-    if ($Port) { $PyArgs += ("--port", $Port) }
-    if ($Gpu) { $PyArgs += "--gpu" }
-}
-elseif ($Mode -eq "client") {
-    $PyArgs += ($Path, "--thresh", $Thresh)
-    if ($ServerAddr) { $PyArgs += ("--host", $ServerAddr) }
-    if ($Port) { $PyArgs += ("--port", $Port) }
-    if ($Force) { $PyArgs += "--force" }
-    
-    # Client Mode Features
-    if ($Organize) { $PyArgs += "--organize" }
-    if ($IgnoreSensitive) { $PyArgs += "--ignore-sensitive" }
-    if ($PSBoundParameters.ContainsKey('RatingThresh')) {
-        $PyArgs += ("--rating-thresh", $RatingThresh)
-    }
-}
-else {
-    # Standalone
-    $PyArgs += ($Path, "--thresh", $Thresh)
-    if ($Gpu) { $PyArgs += "--gpu" }
-    if ($Force) { $PyArgs += "--force" }
-    if ($Organize) { $PyArgs += "--organize" }
-    if ($IgnoreSensitive) { $PyArgs += "--ignore-sensitive" }
-    if ($PSBoundParameters.ContainsKey('RatingThresh')) {
-        $PyArgs += ("--rating-thresh", $RatingThresh)
-    }
-    
-    if ($ServerAddr) { $PyArgs += ("--host", $ServerAddr) }
-    if ($Port) { $PyArgs += ("--port", $Port) }
-}
+# その他パラメータ
+if ($Thresh -ne 0.35) { $PyArgs += ("--thresh", $Thresh) }
+if ($Gpu) { $PyArgs += "--gpu" }
+if ($Force) { $PyArgs += "--force" }
 
-Write-Host "[INFO] Pythonスクリプトを開始 ($Mode)..." -ForegroundColor Green
+if ($HostIP) { $PyArgs += ("--host", $HostIP) }
+if ($Port) { $PyArgs += ("--port", $Port) }
+
+# Old Params
+if ($PSBoundParameters.ContainsKey('RatingThresh')) { $PyArgs += ("--rating-thresh", $RatingThresh) }
+if ($IgnoreSensitive) { $PyArgs += "--ignore-sensitive" }
+
+# 最後にパス
+if ($Path) { $PyArgs += $Path }
+
+# 実行
+Write-Host "[INFO] Pythonスクリプトを実行..." -ForegroundColor Green
 & $VenvPython @PyArgs
 
-# ★ 自動レポート生成 (ログがあれば)
-if (Test-Path $LogFile) {
-    Write-Host "`n[INFO] レポートHTMLを作成中..." -ForegroundColor Cyan
-    & $VenvPython $ReportScript
-    # 削除は make_report.py 側で行うため、ここでは呼ばなくてよい
-}
-
-echo "[INFO] Done."
 #endregion

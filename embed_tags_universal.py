@@ -19,6 +19,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import urllib.request
 import urllib.error
 
+# レポート作成モジュールのインポート（失敗しても止まらないようにする）
+try:
+    import make_report
+except ImportError:
+    make_report = None
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -30,13 +36,10 @@ IS_LINUX = (SYSTEM_OS == 'Linux')
 
 if IS_WINDOWS:
     EXIFTOOL_CMD = "exiftool"
-    FS_ENCODING = 'utf-8' 
 else:
     EXIFTOOL_CMD = "exiftool"
-    FS_ENCODING = 'utf-8'
 
 VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
-
 RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 
 # ==========================================
@@ -50,7 +53,7 @@ DEFAULT_CONFIG = {
     "server_host": "localhost",
     "server_port": 5000,
     "sensitive_split_threshold": 0.50,
-    "general_threshold": 0.40,  # ★追加: これを超えれば即General
+    "general_threshold": 0.40,
     "folder_names": {
         "general": "R-00",
         "sensitive_mild": "R-15_0",
@@ -60,27 +63,51 @@ DEFAULT_CONFIG = {
     }
 }
 
+def merge_defaults(target, source):
+    """
+    辞書を再帰的にマージし、不足しているキーがあれば追加する。
+    変更があった場合は True を返す。
+    """
+    has_change = False
+    for k, v in source.items():
+        if k not in target:
+            target[k] = v
+            has_change = True
+        elif isinstance(v, dict) and isinstance(target.get(k), dict):
+            if merge_defaults(target[k], v):
+                has_change = True
+    return has_change
+
 def load_config():
     config = DEFAULT_CONFIG.copy()
+    
     if not os.path.exists(CONFIG_FILE):
-        print(f"[INFO] Creating default config file: {CONFIG_FILE}")
+        print(f"[INFO] コンフィグファイルを生成しました: {CONFIG_FILE}")
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(DEFAULT_CONFIG, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"[WARN] Failed to create config file: {e}")
+            print(f"[WARN] コンフィグファイルの作成に失敗しました: {e}")
     else:
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
-                for key in ["server_host", "server_port", "sensitive_split_threshold", "general_threshold"]:
-                    if key in user_config:
-                        config[key] = user_config[key]
-                if "folder_names" in user_config:
-                    config["folder_names"].update(user_config["folder_names"])
-                print(f"[INFO] Loaded config from {CONFIG_FILE}")
+            
+            # デフォルト設定とマージして、不足項目があれば追加・保存する
+            if merge_defaults(user_config, DEFAULT_CONFIG):
+                print(f"[INFO] コンフィグファイルを更新しました（不足項目を追加）: {CONFIG_FILE}")
+                try:
+                    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(user_config, f, indent=4, ensure_ascii=False)
+                except Exception as e:
+                    print(f"[WARN] コンフィグファイルの更新保存に失敗しました: {e}")
+            
+            config = user_config
+            print(f"[INFO] コンフィグを読み込みました: {CONFIG_FILE}")
+            
         except Exception as e:
-            print(f"[WARN] Failed to load config file: {e}. Using defaults.")
+            print(f"[WARN] コンフィグの読み込みに失敗しました: {e}. デフォルト値を使用します。")
+            
     return config
 
 APP_CONFIG = load_config()
@@ -125,7 +152,7 @@ class ExifToolWrapper:
             )
             self.running = True
         except Exception as e:
-            print(f"[ERROR] Failed to start ExifTool: {e}")
+            print(f"[ERROR] ExifToolの起動に失敗しました: {e}")
             self.running = False
 
     def stop(self):
@@ -158,7 +185,7 @@ class ExifToolWrapper:
                 output_lines.append(line_str)
             return "\n".join(output_lines)
         except Exception as e:
-            print(f"[Error] ExifTool communication: {e}")
+            print(f"[Error] ExifTool通信エラー: {e}")
             self.stop()
             return ""
 
@@ -180,32 +207,6 @@ class ExifToolWrapper:
 
 et_wrapper = ExifToolWrapper()
 
-def get_ip_addresses():
-    ips = []
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        lan_ip = s.getsockname()[0]
-        s.close()
-        ips.append(f"LAN: {lan_ip}")
-    except Exception:
-        pass
-    
-    if IS_LINUX:
-        try:
-            cmd = ["ip", "-4", "addr", "show"]
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            for line in res.stdout.split('\n'):
-                if "inet" in line and "100." in line:
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        ts_ip = parts[1].split('/')[0]
-                        if ts_ip.startswith("100."):
-                            ips.append(f"Tailscale: {ts_ip}")
-        except Exception:
-            pass
-    return ips
-
 def load_model_and_tags(use_gpu=False):
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     model_path = hf_hub_download(repo_id=repo_id, filename="model.onnx")
@@ -226,13 +227,13 @@ def load_model_and_tags(use_gpu=False):
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 3
     
-    print(f"[INFO] Attempting providers: {providers}")
+    print(f"[INFO] 試行プロバイダ: {providers}")
     try:
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=providers)
-        print(f"[INFO] Active Providers: {sess.get_providers()}")
+        print(f"[INFO] アクティブプロバイダ: {sess.get_providers()}")
     except Exception as e:
-        print(f"[WARN] Failed to load GPU provider. Error: {e}")
-        print("[INFO] Fallback to CPU.")
+        print(f"[WARN] GPUプロバイダのロードに失敗しました: {e}")
+        print("[INFO] CPUモードに切り替えます。")
         sess = ort.InferenceSession(model_path, sess_options=sess_options, providers=['CPUExecutionProvider'])
     return sess, tags, sess.get_inputs()[0].name, sess.get_outputs()[0].name
 
@@ -277,19 +278,19 @@ def organize_file(file_path, rating):
         shutil.move(abs_path, target_path)
         return True, target_path
     except Exception as e:
-        tqdm.write(f"[Warn] Failed to move {file_path}: {e}")
+        tqdm.write(f"[Warn] 移動失敗 {file_path}: {e}")
         return False, file_path
 
 def collect_images(path_args, recursive=True):
     collected = []
     for p in path_args:
         if '*' in p or '?' in p:
-            candidates = glob.glob(p, recursive=True)
+            candidates = glob.glob(p, recursive=recursive) # 引数recursiveに従う
         else:
             candidates = [p]
         for candidate in candidates:
             if os.path.isdir(candidate):
-                print(f"[INFO] Scanning directory (Recursive={recursive}): {candidate}")
+                print(f"[INFO] ディレクトリをスキャン中 (再帰={recursive}): {candidate}")
                 if recursive:
                     for root, _, files in os.walk(candidate):
                         for f in files:
@@ -309,13 +310,9 @@ def collect_images(path_args, recursive=True):
     return sorted(list(set(collected)))
 
 def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive, gen_thresh, fname_disp=""):
-    """
-    推論結果からレーティングを決定し、ログを出力する。
-    ★修正: General優先ロジック追加★
-    """
     rating_probs = probs[:4] # Gen, Sen, Que, Exp
     
-    # --- ログ出力 ---
+    # ログ出力用
     if fname_disp:
         def fmt_prob(p):
             val = p * 100
@@ -331,11 +328,12 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
 
     # --- 判定ロジック ---
     
-    # 1. General優先チェック (Config値を使用)
+    # 1. General優先チェック (Config値: 0.40)
+    # どんなにNSFWが高くても、General要素が一定以上なら安全側に倒す
     if rating_probs[0] >= gen_thresh:
         rating_idx = 0 # Force General
     else:
-        # 2. NSFW合計チェック (RatingThresh指定時)
+        # 2. NSFW合計チェック (Old: --rating-thresh指定時)
         if rating_thresh is not None:
             nsfw_sum = np.sum(rating_probs[1:])
             if nsfw_sum > rating_thresh:
@@ -343,9 +341,9 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
                 max_nsfw_idx = np.argmax(nsfw_probs)
                 rating_idx = max_nsfw_idx + 1
             else:
-                rating_idx = 0
+                rating_idx = 0 # 合計値が低ければGeneral
         else:
-            # 3. 通常の最大値判定
+            # 3. 通常判定（最大値）
             rating_idx = np.argmax(rating_probs)
     
     rating = tags[rating_idx]
@@ -357,11 +355,10 @@ def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive,
         else:
             rating = 'sensitive_high'
     
-    # Ignore Sensitive
+    # Old: Ignore Sensitive
     if (rating == 'sensitive' or rating == 'sensitive_mild' or rating == 'sensitive_high') and ignore_sensitive:
         rating = 'general'
 
-    # ログの続き（結果表示）
     if fname_disp:
         folder_mapping = APP_CONFIG.get("folder_names", {})
         folder_name = folder_mapping.get(rating, rating)
@@ -397,69 +394,146 @@ def run_server(port, use_gpu):
     init_global_model(use_gpu)
     server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, TagServerHandler)
-    print(f"\n[INFO] Server running on Port {port}")
+    print(f"\n[INFO] サーバー稼働中 Port: {port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
 
-def run_client(target_files, host, port, thresh, force, args):
-    url = f"http://{host}:{port}"
-    print(f"[INFO] Connecting to Server: {url}")
-    et_wrapper.start()
+# ==========================================
+# ★ メイン処理 (Client / Standalone)
+# ==========================================
+def process_images(args):
+    """
+    ClientモードとStandaloneモードの共通処理ロジック
+    """
+    host = args.host
+    port = args.port
+    is_client = (args.mode == 'client')
     
-    repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
-    tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
-    tags = []
-    with open(tags_path, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        next(reader)
-        tags = [row[1] for row in reader]
-
+    # 設定値ロード
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
-    gen_thresh = APP_CONFIG.get("general_threshold", 0.40) # Configから取得
+    gen_thresh = APP_CONFIG.get("general_threshold", 0.40)
+    
+    # モデルロード (Standaloneのみ)
+    if not is_client:
+        print("[INFO] モデルをロード中...")
+        init_global_model(args.gpu)
+
+    # サーバーURL (Clientのみ)
+    server_url = f"http://{host}:{port}"
+    if is_client:
+        print(f"[INFO] サーバーに接続: {server_url}")
+
+    # ExifTool起動 (タグ付けが無効でなければ)
+    if not args.no_tag:
+        et_wrapper.start()
+    
+    # タグリスト取得用 (Standaloneはロード済み、Clientはダウンロード)
+    tags = tags_global
+    if is_client:
+        repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
+        tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
+        with open(tags_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader)
+            tags = [row[1] for row in reader]
+
+    # 対象ファイル収集
+    # --- 再帰設定の決定 ---
+    use_recursive = True
+    if args.recursive is not None:
+        use_recursive = args.recursive # ユーザー指定優先
+    else:
+        # デフォルトロジック:
+        # Organizeが含まれる場合は「直下のみ(False)」
+        # Tag付けのみの場合は「再帰(True)」
+        if args.organize:
+            use_recursive = False
+        else:
+            use_recursive = True
+    
+    target_files = collect_images(args.images, recursive=use_recursive)
+    if not target_files:
+        print("[WARN] 対象ファイルが見つかりません。")
+        if not args.no_tag: et_wrapper.stop()
+        return
 
     processed_count = 0
     skipped_count = 0
     organized_count = 0
-    
+
     pbar = tqdm(target_files, unit="img", ncols=80)
+    
     for img_path in pbar:
         try:
             rating = None
             existing_tags = []
-            if not force:
-                existing_tags = et_wrapper.get_tags(img_path)
             
+            # --- 1. タグ情報の取得・推論必要性判定 ---
             need_inference = True
-            if existing_tags and not force:
-                if args.rating_thresh is not None:
-                    need_inference = True
-                elif args.organize:
-                    found_ratings = [t for t in existing_tags if t in RATING_TAGS]
-                    if found_ratings:
-                        rating = found_ratings[0]
-                        if rating == 'sensitive': need_inference = True
-                        else: need_inference = False
-                    else: need_inference = True
-                else: need_inference = False
             
-            detected_tags = []
+            # タグ付けが無効なら推論も不要...と言いたいが、
+            # 整理(Organize)のためにレーティングが必要な場合がある。
+            # レポート(Report)のためにも確率は必要。
+            
+            # 既存タグの確認
+            if not args.no_tag or args.organize:
+                # ExifToolが起動していれば読む
+                if et_wrapper.running:
+                    existing_tags = et_wrapper.get_tags(img_path)
+
+            # 強制モードなら問答無用で推論
+            if args.force:
+                need_inference = True
+            elif existing_tags:
+                # 既存タグがある場合
+                if args.rating_thresh is not None:
+                    # Old: 閾値判定モードなら再推論必要
+                    need_inference = True
+                else:
+                    # 既にタグがある
+                    if args.organize:
+                        # 整理モード: 既存タグにRatingがあれば推論スキップできる
+                        found_ratings = [t for t in existing_tags if t in RATING_TAGS]
+                        if found_ratings:
+                            rating = found_ratings[0]
+                            # ただしSensitiveの場合、Mild/High判定のために推論した方がいいか？
+                            # 今回の仕様では既存タグを信じる
+                            need_inference = False
+                        else:
+                            # Ratingタグがないなら推論必要
+                            need_inference = True
+                    else:
+                        # 整理もしない、タグもある -> スキップ
+                        need_inference = False
+            
+            # --- 2. 推論実行 ---
             probs = None
+            detected_tags = []
             final_path = img_path
 
             if need_inference:
-                with open(img_path, 'rb') as f:
-                    img_data = f.read()
-                req = urllib.request.Request(url, data=img_data, method='POST')
-                req.add_header('Content-Type', 'application/octet-stream')
-                with urllib.request.urlopen(req) as res:
-                    if res.status != 200:
-                        tqdm.write(f"Server Error: {res.status}")
-                        continue
-                    response_body = res.read()
-                    probs = np.array(json.loads(response_body.decode('utf-8')))
-                
+                # 画像読み込み
+                if is_client:
+                    # Client: 画像を送信
+                    with open(img_path, 'rb') as f:
+                        img_data = f.read()
+                    req = urllib.request.Request(server_url, data=img_data, method='POST')
+                    req.add_header('Content-Type', 'application/octet-stream')
+                    with urllib.request.urlopen(req) as res:
+                        if res.status != 200:
+                            tqdm.write(f"Server Error: {res.status}")
+                            continue
+                        response_body = res.read()
+                        probs = np.array(json.loads(response_body.decode('utf-8')))
+                else:
+                    # Standalone: ローカル推論
+                    pil_image = Image.open(img_path)
+                    img_input = preprocess(pil_image)
+                    probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
+
+                # レーティング計算
                 fname_disp = os.path.basename(img_path)
                 if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                 
@@ -467,17 +541,21 @@ def run_client(target_files, host, port, thresh, force, args):
                     probs, tags, 
                     args.rating_thresh, 
                     split_thresh, 
-                    args.ignore_sensitive,
-                    gen_thresh, # 渡す
+                    args.ignore_sensitive, 
+                    gen_thresh,
                     fname_disp
                 )
 
+                # タグ抽出
                 for i, p in enumerate(probs):
-                    if p > thresh: detected_tags.append(tags[i])
-                
+                    if p > args.thresh: detected_tags.append(tags[i])
+
+            # --- 3. アクション: タグ書き込み ---
+            if not args.no_tag:
                 should_write = False
-                if not existing_tags: should_write = True
-                if force: should_write = True
+                if args.force: should_write = True
+                elif not existing_tags: should_write = True
+                # ※既存タグがあってもOrganize等のために推論したが、上書きモードでなければ書かない
                 
                 if should_write and detected_tags:
                     if et_wrapper.write_tags(img_path, detected_tags):
@@ -485,15 +563,18 @@ def run_client(target_files, host, port, thresh, force, args):
                 elif not should_write:
                     skipped_count += 1
             else:
+                if need_inference: pass # 推論したけど書かない
                 skipped_count += 1
 
+            # --- 4. アクション: フォルダ整理 ---
             if args.organize and rating:
                 moved, new_path = organize_file(img_path, rating)
                 if moved: 
                     organized_count += 1
                     final_path = new_path
             
-            if args.save_report and probs is not None:
+            # --- 5. アクション: レポートデータ蓄積 ---
+            if not args.no_report and probs is not None:
                 REPORT_DATA.append({
                     "path": os.path.abspath(final_path),
                     "rating": rating,
@@ -501,154 +582,103 @@ def run_client(target_files, host, port, thresh, force, args):
                 })
 
         except urllib.error.URLError as e:
-            tqdm.write(f"Connection Error: {e}")
+            tqdm.write(f"接続エラー: {e}")
             break
         except KeyboardInterrupt:
-            print("\nAborted.")
-            et_wrapper.stop()
+            print("\n[INFO] 中断されました。")
+            if not args.no_tag: et_wrapper.stop()
             sys.exit(0)
         except Exception as e:
-            tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
+            tqdm.write(f"エラー {os.path.basename(img_path)}: {e}")
+
+    if not args.no_tag:
+        et_wrapper.stop()
     
-    et_wrapper.stop()
-    print(f"\n[Done] Processed: {processed_count}, Skipped: {skipped_count}, Organized: {organized_count}")
+    print(f"\n[完了] タグ付け: {processed_count}, スキップ: {skipped_count}, 整理: {organized_count}")
     
-    if args.save_report and REPORT_DATA:
-        with open(REPORT_LOG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(REPORT_DATA, f, ensure_ascii=False)
-        print(f"[INFO] Report log saved to {REPORT_LOG_FILE}")
+    # --- 6. レポート生成 ---
+    if not args.no_report:
+        if REPORT_DATA:
+            # ログ保存
+            with open(REPORT_LOG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(REPORT_DATA, f, ensure_ascii=False)
+            print(f"[INFO] レポート用ログを保存: {REPORT_LOG_FILE}")
+            
+            # モジュール呼び出し
+            if make_report:
+                print("[INFO] HTMLレポートを生成中...")
+                make_report.make_report()
+            else:
+                print("[WARN] make_report モジュールが見つからないため、HTML生成をスキップします。")
+        else:
+            print("[INFO] レポート対象データがありませんでした。")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="WD14 Tagger Universal")
-    parser.add_argument("--mode", choices=['standalone', 'server', 'client'], default='standalone')
-    parser.add_argument("images", nargs='*')
-    parser.add_argument("--thresh", type=float, default=0.35)
-    parser.add_argument("--rating-thresh", type=float, default=None)
-    parser.add_argument("--ignore-sensitive", action="store_true")
-    parser.add_argument("--gpu", action="store_true")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--organize", action="store_true")
-    parser.add_argument("--host", default=None)
-    parser.add_argument("--port", type=int, default=None)
-    parser.add_argument("--gen-config", action="store_true")
-    parser.add_argument("--save-report", action="store_true")
+    parser = argparse.ArgumentParser(description="WD14 Tagger Universal (日本語版)", add_help=False)
     
+    # メイン引数
+    parser.add_argument("images", nargs='*', help="処理対象の画像またはフォルダパス")
+    
+    # モード選択
+    mode_group = parser.add_argument_group("実行モード")
+    mode_group.add_argument("--mode", choices=['standalone', 'server', 'client'], default='standalone',
+                            help="動作モード (standalone: 通常, server: 待機, client: 送信)")
+    
+    # アクション設定 (デフォルト: Tag=ON, Organize=OFF, Report=ON)
+    action_group = parser.add_argument_group("アクション設定")
+    action_group.add_argument("--no-tag", action="store_true", help="タグ付け処理を行わない")
+    action_group.add_argument("--organize", action="store_true", help="レーティングに基づいてフォルダ振り分けを行う")
+    action_group.add_argument("--no-report", action="store_true", help="HTMLレポートを作成しない")
+    
+    # 判定・システム設定
+    conf_group = parser.add_argument_group("判定・システム設定")
+    conf_group.add_argument("--thresh", type=float, default=0.35, help="タグ採用の確信度閾値 (0.35)")
+    conf_group.add_argument("--gpu", action="store_true", help="GPUを使用する")
+    conf_group.add_argument("--force", action="store_true", help="既存タグがあっても強制的に再解析・上書きする")
+    
+    # 再帰設定 (True/False/None)
+    # store_constを使って、指定された場合のみ値をセット、なければNone
+    conf_group.add_argument("--recursive", action="store_const", const=True, default=None,
+                            help="サブフォルダも再帰的に検索する (指定優先)")
+    conf_group.add_argument("--no-recursive", action="store_const", const=False, dest="recursive",
+                            help="サブフォルダは検索しない (指定優先)")
+
+    # サーバー設定
+    net_group = parser.add_argument_group("ネットワーク設定")
+    net_group.add_argument("--host", default=None, help="サーバーIPアドレス")
+    net_group.add_argument("--port", type=int, default=None, help="ポート番号")
+    
+    # 旧機能・その他
+    misc_group = parser.add_argument_group("その他・旧機能")
+    misc_group.add_argument("--rating-thresh", type=float, default=None, help="[Old] R指定タグ合計値による閾値判定")
+    misc_group.add_argument("--ignore-sensitive", action="store_true", help="[Old] SensitiveをGeneralとして扱う")
+    misc_group.add_argument("--gen-config", action="store_true", help="設定ファイル生成のみ実行")
+    misc_group.add_argument("-h", "--help", action="help", help="ヘルプを表示")
+
     args = parser.parse_args()
 
-    if IS_WINDOWS: os.system('')
-    if args.gen_config: sys.exit(0)
+    if IS_WINDOWS: os.system('') # ANSI Color Enable
 
+    if args.gen_config:
+        load_config()
+        sys.exit(0)
+
+    # ConfigDefaults
     if args.host is None: args.host = APP_CONFIG.get("server_host", "localhost")
     if args.port is None: args.port = APP_CONFIG.get("server_port", 5000)
 
-    split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
-    gen_thresh = APP_CONFIG.get("general_threshold", 0.40) # Configから取得
-    use_recursive = not args.organize
-
+    # 実行
     if args.mode == 'server':
         run_server(args.port, args.gpu)
-    elif args.mode == 'client':
-        if not args.images:
-            print("Error: No images specified for client mode.")
-            return
-        files = collect_images(args.images, recursive=use_recursive)
-        run_client(files, args.host, args.port, args.thresh, args.force, args)
     else:
+        # Client or Standalone
         if not args.images:
+            print(f"{Colors.YELLOW}[案内] 画像ファイルまたはフォルダを指定してください。{Colors.RESET}")
             parser.print_help()
             return
-        files = collect_images(args.images, recursive=use_recursive)
-        if not files:
-            print("No files found.")
-            return
-        print("Loading model...")
-        init_global_model(args.gpu)
-        et_wrapper.start()
         
-        processed = 0
-        skipped = 0
-        organized = 0
-        
-        pbar = tqdm(files, unit="img", ncols=80)
-        for img_path in pbar:
-            try:
-                rating = None
-                existing_tags = []
-                existing_tags = et_wrapper.get_tags(img_path)
-                
-                need_inference = True
-                if existing_tags and not args.force:
-                    if args.rating_thresh is not None: need_inference = True
-                    elif args.organize:
-                        found = [t for t in existing_tags if t in RATING_TAGS]
-                        if found:
-                            rating = found[0]
-                            if rating == 'sensitive': need_inference = True
-                            else: need_inference = False
-                        else: need_inference = True
-                    else: need_inference = False
-                
-                detected_tags = []
-                probs = None
-                final_path = img_path
-
-                if need_inference:
-                    pil_image = Image.open(img_path)
-                    img_input = preprocess(pil_image)
-                    probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
-                    
-                    fname_disp = os.path.basename(img_path)
-                    if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
-                    
-                    rating = calculate_rating(
-                        probs, tags_global, 
-                        args.rating_thresh, 
-                        split_thresh, 
-                        args.ignore_sensitive, 
-                        gen_thresh, # 渡す
-                        fname_disp
-                    )
-
-                    for i, p in enumerate(probs):
-                        if p > args.thresh: detected_tags.append(tags_global[i])
-                    
-                    should_write = False
-                    if not existing_tags: should_write = True
-                    if args.force: should_write = True
-                    
-                    if should_write and detected_tags:
-                        if et_wrapper.write_tags(img_path, detected_tags): processed += 1
-                    elif not should_write: skipped += 1
-                else:
-                    skipped += 1
-                
-                if args.organize and rating:
-                    moved, new_path = organize_file(img_path, rating)
-                    if moved: 
-                        organized += 1
-                        final_path = new_path
-                
-                if args.save_report and probs is not None:
-                    REPORT_DATA.append({
-                        "path": os.path.abspath(final_path),
-                        "rating": rating,
-                        "probs": probs[:4].tolist()
-                    })
-
-            except KeyboardInterrupt:
-                print("\n[INFO] Stopping...")
-                et_wrapper.stop()
-                sys.exit(0)
-            except Exception as e:
-                tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
-        
-        et_wrapper.stop()
-        print(f"\n[Done] Processed: {processed}, Skipped: {skipped}, Organized: {organized}")
-
-        if args.save_report and REPORT_DATA:
-            with open(REPORT_LOG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(REPORT_DATA, f, ensure_ascii=False)
-            print(f"[INFO] Report log saved to {REPORT_LOG_FILE}")
+        process_images(args)
 
 if __name__ == "__main__":
     main()
