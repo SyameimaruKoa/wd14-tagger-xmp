@@ -44,12 +44,13 @@ RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
 # ==========================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
-REPORT_LOG_FILE = os.path.join(SCRIPT_DIR, "report_log.json")
+REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
 
 DEFAULT_CONFIG = {
     "server_host": "localhost",
     "server_port": 5000,
     "sensitive_split_threshold": 0.50,
+    "general_threshold": 0.40,  # ★追加: これを超えれば即General
     "folder_names": {
         "general": "R-00",
         "sensitive_mild": "R-15_0",
@@ -72,7 +73,7 @@ def load_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 user_config = json.load(f)
-                for key in ["server_host", "server_port", "sensitive_split_threshold"]:
+                for key in ["server_host", "server_port", "sensitive_split_threshold", "general_threshold"]:
                     if key in user_config:
                         config[key] = user_config[key]
                 if "folder_names" in user_config:
@@ -91,6 +92,7 @@ class Colors:
     MAGENTA = '\033[35m'
     RED = '\033[31m'
     GREY = '\033[90m'
+    CYAN = '\033[36m'
     RESET = '\033[0m'
 
 def get_bar(prob, color, width=5):
@@ -306,64 +308,76 @@ def collect_images(path_args, recursive=True):
                     collected.append(candidate)
     return sorted(list(set(collected)))
 
-def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive, fname_disp=""):
+def calculate_rating(probs, tags, rating_thresh, split_thresh, ignore_sensitive, gen_thresh, fname_disp=""):
     """
-    推論結果(probs)からレーティングを決定し、ログを出力する。
-    ★修正: NSFW合計値で閾値判定を行う★
+    推論結果からレーティングを決定し、ログを出力する。
+    ★修正: General優先ロジック追加★
     """
     rating_probs = probs[:4] # Gen, Sen, Que, Exp
     
-    def fmt_prob(p):
-        val = p * 100
-        if val >= 100: return "100.0%"
-        return f"{val:04.1f}%"
-
+    # --- ログ出力 ---
     if fname_disp:
+        def fmt_prob(p):
+            val = p * 100
+            if val >= 100: return "100.0%"
+            return f"{val:04.1f}%"
+
         b_gen = get_bar(rating_probs[0], Colors.GREEN)
         b_sen = get_bar(rating_probs[1], Colors.YELLOW)
         b_que = get_bar(rating_probs[2], Colors.MAGENTA)
         b_exp = get_bar(rating_probs[3], Colors.RED)
 
-        tqdm.write(f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} Sen:{b_sen}{fmt_prob(rating_probs[1])} Que:{b_que}{fmt_prob(rating_probs[2])} Exp:{b_exp}{fmt_prob(rating_probs[3])}")
+        tqdm.write(f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} Sen:{b_sen}{fmt_prob(rating_probs[1])} Que:{b_que}{fmt_prob(rating_probs[2])} Exp:{b_exp}{fmt_prob(rating_probs[3])}", end="")
 
-    if rating_thresh is not None:
-        # NSFWカテゴリ(1:Sensitive, 2:Questionable, 3:Explicit)の合計を計算
-        nsfw_sum = np.sum(rating_probs[1:])
-        
-        # 合計が閾値を超えているならNSFW扱い
-        if nsfw_sum > rating_thresh:
-            # NSFWの中で最も高いものを選ぶ
-            nsfw_probs = rating_probs[1:]
-            max_nsfw_idx = np.argmax(nsfw_probs)
-            rating_idx = max_nsfw_idx + 1 # +1 to offset General (0)
-        else:
-            # 閾値を超えていないならGeneral
-            rating_idx = 0
+    # --- 判定ロジック ---
+    
+    # 1. General優先チェック (Config値を使用)
+    if rating_probs[0] >= gen_thresh:
+        rating_idx = 0 # Force General
     else:
-        # 閾値指定がない場合は単純に最大値を選ぶ (標準動作)
-        rating_idx = np.argmax(rating_probs)
+        # 2. NSFW合計チェック (RatingThresh指定時)
+        if rating_thresh is not None:
+            nsfw_sum = np.sum(rating_probs[1:])
+            if nsfw_sum > rating_thresh:
+                nsfw_probs = rating_probs[1:]
+                max_nsfw_idx = np.argmax(nsfw_probs)
+                rating_idx = max_nsfw_idx + 1
+            else:
+                rating_idx = 0
+        else:
+            # 3. 通常の最大値判定
+            rating_idx = np.argmax(rating_probs)
     
     rating = tags[rating_idx]
 
-    # Sensitive細分化 (Configの閾値)
+    # Sensitive細分化
     if rating == 'sensitive':
         if rating_probs[1] < split_thresh:
             rating = 'sensitive_mild'
         else:
             rating = 'sensitive_high'
     
-    # Ignore Sensitive (Configまたは引数)
+    # Ignore Sensitive
     if (rating == 'sensitive' or rating == 'sensitive_mild' or rating == 'sensitive_high') and ignore_sensitive:
         rating = 'general'
+
+    # ログの続き（結果表示）
+    if fname_disp:
+        folder_mapping = APP_CONFIG.get("folder_names", {})
+        folder_name = folder_mapping.get(rating, rating)
+        
+        res_color = Colors.CYAN
+        if rating == 'explicit': res_color = Colors.RED
+        elif rating == 'questionable': res_color = Colors.MAGENTA
+        elif 'sensitive' in rating: res_color = Colors.YELLOW
+        elif rating == 'general': res_color = Colors.GREEN
+
+        tqdm.write(f" => {res_color}[{folder_name}]{Colors.RESET}")
 
     return rating
 
 class TagServerHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        pass
-
     def do_POST(self):
-        global req_count
         try:
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
@@ -375,10 +389,7 @@ class TagServerHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(response_data.encode('utf-8'))
-            req_count += 1
-            print(f"[INFO] Req #{req_count} | {self.client_address[0]} | {content_length} bytes")
-        except Exception as e:
-            print(f"[Error] Processing request: {e}")
+        except Exception:
             self.send_response(500)
             self.end_headers()
 
@@ -386,19 +397,11 @@ def run_server(port, use_gpu):
     init_global_model(use_gpu)
     server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, TagServerHandler)
-    
     print(f"\n[INFO] Server running on Port {port}")
-    ips = get_ip_addresses()
-    for ip in ips:
-        print(f"[INFO] {ip}")
-    
-    print(f"[INFO] Ready to accept requests.")
-    print(f"[INFO] Press Ctrl+C to stop.\n")
-    
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n[INFO] Server stopped.")
+        pass
 
 def run_client(target_files, host, port, thresh, force, args):
     url = f"http://{host}:{port}"
@@ -414,6 +417,8 @@ def run_client(target_files, host, port, thresh, force, args):
         tags = [row[1] for row in reader]
 
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
+    gen_thresh = APP_CONFIG.get("general_threshold", 0.40) # Configから取得
+
     processed_count = 0
     skipped_count = 0
     organized_count = 0
@@ -458,7 +463,14 @@ def run_client(target_files, host, port, thresh, force, args):
                 fname_disp = os.path.basename(img_path)
                 if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                 
-                rating = calculate_rating(probs, tags, args.rating_thresh, split_thresh, args.ignore_sensitive, fname_disp)
+                rating = calculate_rating(
+                    probs, tags, 
+                    args.rating_thresh, 
+                    split_thresh, 
+                    args.ignore_sensitive,
+                    gen_thresh, # 渡す
+                    fname_disp
+                )
 
                 for i, p in enumerate(probs):
                     if p > thresh: detected_tags.append(tags[i])
@@ -530,6 +542,7 @@ def main():
     if args.port is None: args.port = APP_CONFIG.get("server_port", 5000)
 
     split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
+    gen_thresh = APP_CONFIG.get("general_threshold", 0.40) # Configから取得
     use_recursive = not args.organize
 
     if args.mode == 'server':
@@ -587,7 +600,14 @@ def main():
                     fname_disp = os.path.basename(img_path)
                     if len(fname_disp) > 20: fname_disp = fname_disp[:17] + "..."
                     
-                    rating = calculate_rating(probs, tags_global, args.rating_thresh, split_thresh, args.ignore_sensitive, fname_disp)
+                    rating = calculate_rating(
+                        probs, tags_global, 
+                        args.rating_thresh, 
+                        split_thresh, 
+                        args.ignore_sensitive, 
+                        gen_thresh, # 渡す
+                        fname_disp
+                    )
 
                     for i, p in enumerate(probs):
                         if p > args.thresh: detected_tags.append(tags_global[i])
@@ -605,7 +625,7 @@ def main():
                 if args.organize and rating:
                     moved, new_path = organize_file(img_path, rating)
                     if moved: 
-                        organized_count += 1
+                        organized += 1
                         final_path = new_path
                 
                 if args.save_report and probs is not None:
@@ -616,6 +636,7 @@ def main():
                     })
 
             except KeyboardInterrupt:
+                print("\n[INFO] Stopping...")
                 et_wrapper.stop()
                 sys.exit(0)
             except Exception as e:
