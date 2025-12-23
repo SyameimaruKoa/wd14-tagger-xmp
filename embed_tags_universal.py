@@ -36,6 +36,9 @@ else:
 
 VALID_EXTS = ('.webp', '.jpg', '.jpeg', '.png', '.bmp')
 
+# WD14 Rating Tags (Indices 0-3)
+RATING_TAGS = ['general', 'sensitive', 'questionable', 'explicit']
+
 def get_ip_addresses():
     ips = []
     try:
@@ -113,9 +116,10 @@ def preprocess(image, size=448):
     img_np = np.expand_dims(img_np, 0)
     return img_np
 
-def has_xmp_tags(image_path):
+def get_xmp_tags(image_path):
+    """Reads XMP:Subject tags from the image."""
     try:
-        cmd = [EXIFTOOL_CMD, "-XMP:Subject", "-s3", "-fast", image_path]
+        cmd = [EXIFTOOL_CMD, "-XMP:Subject", "-s3", "-sep", ", ", "-fast", image_path]
         startupinfo = None
         if IS_WINDOWS:
             startupinfo = subprocess.STARTUPINFO()
@@ -124,10 +128,15 @@ def has_xmp_tags(image_path):
             cmd, capture_output=True, text=True, encoding=FS_ENCODING, errors='ignore', startupinfo=startupinfo
         )
         if result.returncode == 0 and result.stdout.strip():
-            return True
-        return False
+            return [t.strip() for t in result.stdout.strip().split(',')]
+        return []
     except Exception:
-        return False
+        return []
+
+def has_xmp_tags(image_path):
+    """Checks if XMP tags exist (fast check)."""
+    tags = get_xmp_tags(image_path)
+    return len(tags) > 0
 
 def write_xmp_passthrough_safe(image_path, tags_list):
     if not tags_list: return False
@@ -170,6 +179,32 @@ def write_xmp_passthrough_safe(image_path, tags_list):
                 tqdm.write(f"CRITICAL: Failed to restore {temp_path}")
                 success = False
     return success
+
+def organize_file(file_path, rating):
+    """Moves the file to a subfolder based on rating."""
+    if not rating:
+        return False
+    
+    try:
+        abs_path = os.path.abspath(file_path)
+        dir_name = os.path.dirname(abs_path)
+        file_name = os.path.basename(abs_path)
+        
+        target_dir = os.path.join(dir_name, rating)
+        os.makedirs(target_dir, exist_ok=True)
+        
+        target_path = os.path.join(target_dir, file_name)
+        
+        # Avoid overwrite collision
+        if os.path.exists(target_path):
+            base, ext = os.path.splitext(file_name)
+            target_path = os.path.join(target_dir, f"{base}_{uuid.uuid4().hex[:6]}{ext}")
+
+        shutil.move(abs_path, target_path)
+        return True
+    except Exception as e:
+        tqdm.write(f"[Warn] Failed to move {file_path}: {e}")
+        return False
 
 def collect_images(path_args):
     collected = []
@@ -289,6 +324,7 @@ def main():
     parser.add_argument("--thresh", type=float, default=0.35)
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--organize", action="store_true", help="Move images to folders based on rating")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=5000)
     args = parser.parse_args()
@@ -313,28 +349,78 @@ def main():
         init_global_model(args.gpu)
         processed = 0
         skipped = 0
+        organized = 0
+        
         pbar = tqdm(files, unit="img", ncols=80)
         for img_path in pbar:
             try:
-                if not args.force:
-                    if has_xmp_tags(img_path):
-                        skipped += 1
-                        continue
-                pil_image = Image.open(img_path)
-                img_input = preprocess(pil_image)
-                probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
+                rating = None
+                existing_tags = []
+                
+                # Check for existing tags
+                if has_xmp_tags(img_path):
+                    existing_tags = get_xmp_tags(img_path)
+                
+                # Logic: If NOT force and tags exist, skip inference (unless we need to organize and rating is missing)
+                need_inference = True
+                if existing_tags and not args.force:
+                    need_inference = False
+                    # If organizing, we try to find rating in existing tags
+                    if args.organize:
+                        found_ratings = [t for t in existing_tags if t in RATING_TAGS]
+                        if found_ratings:
+                            rating = found_ratings[0]
+                        else:
+                            # Tags exist but no rating -> Need inference just for rating? 
+                            # Let's run inference to determine rating if we really want to organize
+                            need_inference = True
+
                 detected_tags = []
-                for i, p in enumerate(probs):
-                    if p > args.thresh:
-                        detected_tags.append(tags_global[i])
-                if detected_tags:
-                    if write_xmp_passthrough_safe(img_path, detected_tags):
-                        processed += 1
+                
+                if need_inference:
+                    pil_image = Image.open(img_path)
+                    img_input = preprocess(pil_image)
+                    probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[0][0]
+                    
+                    # Determine Rating (First 4 outputs)
+                    rating_idx = np.argmax(probs[:4])
+                    rating = tags_global[rating_idx]
+
+                    # Collect tags above threshold
+                    for i, p in enumerate(probs):
+                        if p > args.thresh:
+                            detected_tags.append(tags_global[i])
+                    
+                    # Write tags if we did inference (and not just for rating check)
+                    # If tags existed and we only ran inference for rating (because rating was missing),
+                    # we might want to APPEND rating? Or just leave it?
+                    # For simplicity: If we ran inference, we overwrite/write tags if force or no tags.
+                    # If we ran inference purely to get rating for existing tagged file, maybe don't write?
+                    # Let's stick to standard behavior: If inference ran, we try to write if force is on or tags were empty.
+                    
+                    should_write = False
+                    if not existing_tags: should_write = True
+                    if args.force: should_write = True
+                    
+                    if should_write and detected_tags:
+                        if write_xmp_passthrough_safe(img_path, detected_tags):
+                            processed += 1
+                    elif not should_write:
+                        skipped += 1
+                else:
+                    skipped += 1
+                
+                # Organize
+                if args.organize and rating:
+                    if organize_file(img_path, rating):
+                        organized += 1
+
             except KeyboardInterrupt:
                 sys.exit(0)
             except Exception as e:
                 tqdm.write(f"Error {os.path.basename(img_path)}: {e}")
-        print(f"\n[Done] Processed: {processed}, Skipped: {skipped}")
+        
+        print(f"\n[Done] Processed: {processed}, Skipped: {skipped}, Organized: {organized}")
 
 if __name__ == "__main__":
     main()

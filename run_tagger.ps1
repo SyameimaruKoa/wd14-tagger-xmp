@@ -10,6 +10,9 @@
 .PARAMETER Path
     Target files (Standalone/Client).
 
+.PARAMETER Thresh
+    Threshold for tag confidence (Default: 0.35).
+
 .PARAMETER Server
     Start as Server mode.
 
@@ -27,6 +30,14 @@
 
 .PARAMETER Force
     Force overwrite existing tags.
+
+.PARAMETER Organize
+    Move files to folders (general/sensitive/questionable/explicit) based on rating.
+    If tags exist, it uses the existing rating tag. If not, it runs inference.
+
+.EXAMPLE
+    .\run_tagger.ps1 -Path 'C:\Images' -Gpu -Organize
+    Process images in C:\Images using GPU, and move them to rating folders.
 #>
 
 [CmdletBinding()]
@@ -39,35 +50,39 @@ param (
     [int]$Port = 5000,
     [switch]$Gpu,
     [switch]$Force,
-    [Alias('h')] # ★これでもう迷わせない
+    [switch]$Organize,
+    [Alias('h')]
     [switch]$Help
 )
 
+#region Help Function
 function Show-Help {
     Write-Host "=== WD14 Tagger Universal ===" -ForegroundColor Cyan
     Write-Host "Usage:"
-    Write-Host "  Standalone : .\run_tagger.ps1 -Path 'C:\Imgs' -Gpu"
+    Write-Host "  Standalone : .\run_tagger.ps1 -Path 'C:\Imgs' -Gpu -Organize"
     Write-Host "  Server     : .\run_tagger.ps1 -Server -Gpu"
     Write-Host "  Client     : .\run_tagger.ps1 -Client -Path 'C:\Imgs' -ServerAddr '192.168.x.x'"
     Write-Host ""
     Write-Host "Options:"
+    Write-Host "  -Organize  : Move files to folders based on rating."
     Write-Host "  -h, -Help  : Show this help"
     Write-Host ""
 }
 
 if ($Help) { Show-Help; exit }
+#endregion
 
-# --- 設定 ---
+#region Configuration
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "embed_tags_universal.py"
 
-# OS判定
+# OS Check
 $IsWindows = $true
 if ($PSVersionTable.PSVersion.Major -ge 6) {
     if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
 }
 
-# 仮想環境設定
+# Virtual Env Config
 if ($IsWindows -and $Gpu) {
     $VenvDir = Join-Path $ScriptDir "venv_gpu"
     $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
@@ -75,8 +90,9 @@ if ($IsWindows -and $Gpu) {
     $VenvDir = Join-Path $ScriptDir "venv_std"
     $Requirements = @("onnxruntime", "pillow", "huggingface_hub", "numpy", "tqdm")
 }
+#endregion
 
-# --- 実行開始 ---
+#region Execution Logic
 $Mode = "standalone"
 if ($Server) { $Mode = "server" }
 if ($Client) { $Mode = "client" }
@@ -85,7 +101,7 @@ if ($Mode -ne "server") {
     Write-Host "[INFO] Mode: $Mode"
 }
 
-# 1. venv作成
+# 1. Create venv
 if (-not (Test-Path $VenvDir)) {
     Write-Host "[INFO] Creating venv at $VenvDir ..." -ForegroundColor Yellow
     if ($IsWindows) { python -m venv $VenvDir } else { python3 -m venv $VenvDir }
@@ -106,7 +122,7 @@ if ($PipCheck -notmatch "tqdm") {
     & $VenvPip install $Requirements | Out-Null
 }
 
-# 3. ExifTool
+# 3. ExifTool Check
 if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
     if ($IsWindows) {
         if (-not (Test-Path (Join-Path $ScriptDir "exiftool.exe"))) {
@@ -115,7 +131,7 @@ if (-not (Get-Command "exiftool" -ErrorAction SilentlyContinue)) {
     }
 }
 
-# 4. 実行引数構築
+# 4. Build Arguments
 $PyArgs = @($PythonScript, "--mode", $Mode)
 
 if ($Mode -eq "server") {
@@ -131,7 +147,9 @@ else {
     $PyArgs += ($Path, "--thresh", $Thresh)
     if ($Gpu) { $PyArgs += "--gpu" }
     if ($Force) { $PyArgs += "--force" }
+    if ($Organize) { $PyArgs += "--organize" }
 }
 
 Write-Host "[INFO] Starting Python ($Mode)..." -ForegroundColor Green
 & $VenvPython @PyArgs
+#endregion

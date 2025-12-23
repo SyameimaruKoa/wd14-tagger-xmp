@@ -2,7 +2,6 @@
 
 # ==========================================
 # WD14 Tagger Universal (Bash Wrapper)
-# Auto-fix for NVIDIA/AMD libraries (Final Fix)
 # ==========================================
 
 SCRIPT_DIR=$(cd $(dirname $0); pwd)
@@ -12,6 +11,7 @@ MODE="standalone"
 THRESH=0.35
 USE_GPU=0
 FORCE_MODE=0
+ORGANIZE_MODE=0
 HOST_IP="localhost"
 PORT=5000
 declare -a TARGET_FILES=()
@@ -27,6 +27,8 @@ show_help() {
     echo "  -g, --gpu           Use GPU (Auto-detect)"
     echo "  -p, --path <path>   Target file/folder"
     echo "  -H, --host <ip>     Server IP"
+    echo "  --organize          Move files to folders based on rating"
+    echo "  -f, --force         Force overwrite tags"
     echo "  -h, --help          Show help"
     echo ""
 }
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         -t|--thresh) THRESH="$2"; shift 2 ;;
         -g|--gpu|-gpu) USE_GPU=1; shift ;;
         -f|--force|--force) FORCE_MODE=1; shift ;;
+        --organize) ORGANIZE_MODE=1; shift ;;
         -h|--help) show_help; exit 0 ;;
         *) TARGET_FILES+=("$1"); shift ;;
     esac
@@ -152,6 +155,7 @@ else
     ARGS="$ARGS --thresh $THRESH"
     if [ $USE_GPU -eq 1 ]; then ARGS="$ARGS --gpu"; fi
     if [ $FORCE_MODE -eq 1 ]; then ARGS="$ARGS --force"; fi
+    if [ $ORGANIZE_MODE -eq 1 ]; then ARGS="$ARGS --organize"; fi
     python3 "$PYTHON_SCRIPT" "${TARGET_FILES[@]}" $ARGS
 fi
 
