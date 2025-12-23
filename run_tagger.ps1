@@ -64,7 +64,7 @@ param (
 function Show-Help {
     Write-Host "=== WD14 Tagger Universal ===" -ForegroundColor Cyan
     Write-Host "Usage:"
-    Write-Host "  Standalone : .\run_tagger.ps1 -Path 'C:\Imgs' -Gpu -Organize"
+    Write-Host "  Standalone : .\run_tagger.ps1 -Path 'C:\Imgs' -Gpu -Organize [-RatingThresh 0.5]"
     Write-Host "  Server     : .\run_tagger.ps1 -Server -Gpu"
     Write-Host "  Client     : .\run_tagger.ps1 -Client -Path 'C:\Imgs' -ServerAddr '192.168.x.x'"
     Write-Host ""
