@@ -223,7 +223,8 @@ def load_model_and_tags(use_gpu=False):
         if IS_WINDOWS:
             providers.extend(['DmlExecutionProvider', 'CUDAExecutionProvider'])
         elif IS_LINUX:
-            providers.extend(['CUDAExecutionProvider', 'ROCMExecutionProvider'])
+            # Modified for Intel GPU support (OpenVINO)
+            providers.extend(['OpenVINOExecutionProvider', 'CUDAExecutionProvider', 'ROCMExecutionProvider'])
     providers.append('CPUExecutionProvider')
     sess_options = ort.SessionOptions()
     sess_options.log_severity_level = 3
