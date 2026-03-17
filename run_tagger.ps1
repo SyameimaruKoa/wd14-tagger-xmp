@@ -15,34 +15,30 @@
 .PARAMETER Path
     【対象パス】 (文字列)
     処理対象の画像ファイル、またはフォルダパス。
-    指定するとタグ付け処理が開始される。
 
 .PARAMETER Organize
     【整理モード】 (スイッチ)
     タグ付けを行わず、フォルダ振り分けのみを行うモードじゃ。
-    ※同時に -Tag を指定しない限り、タグ付けは行われない。
-    ※このモードでは、デフォルトで「直下のファイルのみ」が対象になる（再帰OFF）。
 
 .PARAMETER Tag
     【タグ付け有効化】 (スイッチ)
     -Organize と併用する際に、「整理もしつつタグ付けもしたい」場合に指定する。
-    通常モード(-Pathのみ)ではデフォルトでONになっているので指定不要じゃ。
 
 .PARAMETER NoReport
     【レポートなし】 (スイッチ)
     HTMLレポートの作成をスキップする。
-    デフォルトでは処理後に必ずレポートが作られる。
 
 .PARAMETER Recursive
     【再帰検索】 (スイッチ)
     サブフォルダも検索対象にする。
-    通常モードではデフォルトON、整理モードではデフォルトOFFじゃが、
-    これを指定すると強制的にONになる。
 
 .PARAMETER NoRecursive
     【再帰なし】 (スイッチ)
     サブフォルダを検索しない。
-    通常モードで直下だけ処理したい時に使う。
+
+.PARAMETER Thresh
+    【タグ採用閾値】 (数値)
+    タグ付けを採用する確率の閾値。
 
 .PARAMETER Gpu
     【GPU使用】 (スイッチ)
@@ -60,11 +56,28 @@
     【クライアントモード】 (スイッチ)
     クライアントとして動作し、指定したサーバーへ画像を送信する。
 
-.PARAMETER Host
+.PARAMETER HostIP
+    【ホストIP】 (文字列)
     サーバーのIPアドレス。
 
 .PARAMETER Port
+    【ポート】 (数値)
     ポート番号。
+
+.PARAMETER RatingThresh
+    【R指定閾値】 (数値)
+    [旧機能] R指定タグ合計値による閾値判定。
+
+.PARAMETER IgnoreSensitive
+    【Sensitive無視】 (スイッチ)
+    [旧機能] SensitiveをGeneralとして扱う。
+
+.PARAMETER Help
+    【ヘルプ表示】 (スイッチ)
+    このヘルプを表示する。
+
+.PARAMETER RemainingArgs
+    未定義の引数（--helpなど）を捕捉するための内部パラメータ。
 
 .EXAMPLE
     # 初回セットアップ (何もしない)
@@ -101,7 +114,10 @@ param (
     [switch]$IgnoreSensitive,
     
     [Alias('h')]
-    [switch]$Help
+    [switch]$Help,
+
+    [Parameter(ValueFromRemainingArguments=$true)]
+    [string[]]$RemainingArgs
 )
 
 #region Help Function
@@ -109,7 +125,7 @@ function Show-Help {
     Get-Help $MyInvocation.MyCommand.Path -Detailed
 }
 
-if ($Help) { Show-Help; exit }
+if ($Help -or ($RemainingArgs -contains '--help')) { Show-Help; exit }
 #endregion
 
 #region Environment Setup
@@ -163,7 +179,7 @@ function Prepare-Environment {
 #region Main Logic
 
 # 引数が一つもない場合はセットアップモード
-if ($PSBoundParameters.Count -eq 0) {
+if ($PSBoundParameters.Count -eq 0 -and (-not $RemainingArgs)) {
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "   WD14 Tagger Universal - Setup Mode" -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
