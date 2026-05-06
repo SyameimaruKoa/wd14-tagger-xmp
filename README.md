@@ -1,4 +1,4 @@
-# WD14 Tagger Universal (日本語版)
+# WD14 Tagger Universal
 
 このツールは、AI (WD14 Tagger) を使用して画像認識を行い、タグ付け・フォルダ整理・レポート作成を行うツールじゃ。
 
