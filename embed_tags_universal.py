@@ -1,23 +1,9 @@
-import argparse
-import csv
-import os
-import sys
-import subprocess
-import glob
+import argparse, csv, os, sys, subprocess, glob, uuid, shutil, platform, json, io, socket, warnings, urllib.request, urllib.error
 import numpy as np
-import uuid
-import shutil
-import platform
-import json
-import io
-import socket
-import warnings
 import onnxruntime as ort
 from PIL import Image
 from huggingface_hub import hf_hub_download
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import urllib.request
-import urllib.error
 
 try:
     import make_report
@@ -28,9 +14,11 @@ try:
 except ImportError:
     tqdm = lambda x, **kwargs: x
 warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
-SYSTEM_OS = platform.system()
-IS_WINDOWS = SYSTEM_OS == "Windows"
-IS_LINUX = SYSTEM_OS == "Linux"
+SYSTEM_OS, IS_WINDOWS, IS_LINUX = (
+    platform.system(),
+    platform.system() == "Windows",
+    platform.system() == "Linux",
+)
 EXIFTOOL_CMD = "exiftool"
 VALID_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".bmp")
 RATING_TAGS = ["general", "sensitive", "questionable", "explicit"]
@@ -57,8 +45,7 @@ def merge_defaults(target, source):
     has_change = False
     for k, v in source.items():
         if k not in target:
-            target[k] = v
-            has_change = True
+            target[k], has_change = v, True
         elif isinstance(v, dict) and isinstance(target.get(k), dict):
             if merge_defaults(target[k], v):
                 has_change = True
@@ -87,8 +74,11 @@ def load_config():
                         json.dump(user_config, f, indent=4, ensure_ascii=False)
                 except Exception as e:
                     print(f"[WARN] コンフィグファイルの更新保存に失敗しました: {e}")
-            config = user_config
-            print(f"[INFO] コンフィグを読み込みました: {CONFIG_FILE}")
+            config, print_str = (
+                user_config,
+                f"[INFO] コンフィグを読み込みました: {CONFIG_FILE}",
+            )
+            print(print_str)
         except Exception as e:
             print(
                 f"[WARN] コンフィグの読み込みに失敗しました: {e}. デフォルト値を使用します。"
@@ -100,19 +90,22 @@ APP_CONFIG = load_config()
 
 
 class Colors:
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    MAGENTA = "\033[35m"
-    RED = "\033[31m"
-    GREY = "\033[90m"
-    CYAN = "\033[36m"
-    RESET = "\033[0m"
+    GREEN, YELLOW, MAGENTA, RED, GREY, CYAN, RESET = (
+        "\033[32m",
+        "\033[33m",
+        "\033[35m",
+        "\033[31m",
+        "\033[90m",
+        "\033[36m",
+        "\033[0m",
+    )
 
 
 def get_bar(prob, color, width=5):
     fill_len = int(prob * width)
-    empty_len = width - fill_len
-    return f"{color}{'█' * fill_len}{Colors.GREY}{'░' * empty_len}{Colors.RESET}"
+    return (
+        f"{color}{'█' * fill_len}{Colors.GREY}{'░' * (width - fill_len)}{Colors.RESET}"
+    )
 
 
 REPORT_DATA = []
@@ -120,17 +113,14 @@ REPORT_DATA = []
 
 class ExifToolWrapper:
     def __init__(self, cmd=EXIFTOOL_CMD):
-        self.cmd = cmd
-        self.process = None
-        self.running = False
+        self.cmd, self.process, self.running = cmd, None, False
 
     def start(self):
         if self.running:
             return
         try:
-            startupinfo = None
+            startupinfo = subprocess.STARTUPINFO() if IS_WINDOWS else None
             if IS_WINDOWS:
-                startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             self.process = subprocess.Popen(
                 [
@@ -192,9 +182,7 @@ class ExifToolWrapper:
 
     def get_tags(self, path):
         res = self.execute(["-XMP:Subject", "-s3", "-sep", ", ", "-fast", path])
-        if res:
-            return [t.strip() for t in res.split(",")]
-        return []
+        return [t.strip() for t in res.split(",")] if res else []
 
     def write_tags(self, path, tags):
         if not tags:
@@ -221,7 +209,6 @@ def load_model_and_tags(use_gpu=False):
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     model_path = hf_hub_download(repo_id=repo_id, filename="model.onnx")
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
-    tags = []
     with open(tags_path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         next(reader)
@@ -238,6 +225,7 @@ def load_model_and_tags(use_gpu=False):
                     "OpenVINOExecutionProvider",
                     "CUDAExecutionProvider",
                     "ROCMExecutionProvider",
+                    "MIGraphXExecutionProvider",
                 ]
             )
         for p in desired_providers:
@@ -253,18 +241,16 @@ def load_model_and_tags(use_gpu=False):
         )
         print(f"[INFO] アクティブプロバイダ: {sess.get_providers()}")
     except Exception as e:
-        print(f"[WARN] GPUプロバイダのロードに失敗しました: {e}")
-        print("[INFO] CPUモードに切り替えます。")
+        print(
+            f"[WARN] GPUプロバイダのロードに失敗しました: {e}\n[INFO] CPUモードに切り替えます。"
+        )
         sess = ort.InferenceSession(
             model_path, sess_options=sess_options, providers=["CPUExecutionProvider"]
         )
     return sess, tags, sess.get_inputs()[0].name, sess.get_outputs()[0].name
 
 
-sess_global = None
-tags_global = None
-input_name_cache = None
-label_name_cache = None
+sess_global, tags_global, input_name_cache, label_name_cache = None, None, None, None
 
 
 def init_global_model(use_gpu):
@@ -276,12 +262,9 @@ def init_global_model(use_gpu):
 
 
 def preprocess(image, size=448):
-    image = image.convert("RGB")
-    image = image.resize((size, size), Image.BICUBIC)
-    img_np = np.array(image).astype(np.float32)
-    img_np = img_np[:, :, ::-1]
-    img_np = np.expand_dims(img_np, 0)
-    return img_np
+    image = image.convert("RGB").resize((size, size), Image.BICUBIC)
+    img_np = np.array(image).astype(np.float32)[:, :, ::-1]
+    return np.expand_dims(img_np, 0)
 
 
 def organize_file(file_path, rating):
@@ -289,8 +272,7 @@ def organize_file(file_path, rating):
     folder_name = folder_mapping.get(rating, rating)
     try:
         abs_path = os.path.abspath(file_path)
-        dir_name = os.path.dirname(abs_path)
-        file_name = os.path.basename(abs_path)
+        dir_name, file_name = os.path.dirname(abs_path), os.path.basename(abs_path)
         target_dir = os.path.join(dir_name, folder_name)
         if os.path.abspath(dir_name) == os.path.abspath(target_dir):
             return False, abs_path
@@ -311,10 +293,7 @@ def organize_file(file_path, rating):
 def collect_images(path_args, recursive=True):
     collected = []
     for p in path_args:
-        if "*" in p or "?" in p:
-            candidates = glob.glob(p, recursive=recursive)
-        else:
-            candidates = [p]
+        candidates = glob.glob(p, recursive=recursive) if "*" in p or "?" in p else [p]
         for candidate in candidates:
             if os.path.isdir(candidate):
                 print(
@@ -335,9 +314,8 @@ def collect_images(path_args, recursive=True):
                                 collected.append(full_path)
                     except OSError:
                         pass
-            elif os.path.isfile(candidate):
-                if candidate.lower().endswith(VALID_EXTS):
-                    collected.append(candidate)
+            elif os.path.isfile(candidate) and candidate.lower().endswith(VALID_EXTS):
+                collected.append(candidate)
     return sorted(list(set(collected)))
 
 
@@ -352,17 +330,13 @@ def calculate_rating(
 ):
     rating_probs = probs[:4]
     if fname_disp:
-
-        def fmt_prob(p):
-            val = p * 100
-            if val >= 100:
-                return "100.0%"
-            return f"{val:04.1f}%"
-
-        b_gen = get_bar(rating_probs[0], Colors.GREEN)
-        b_sen = get_bar(rating_probs[1], Colors.YELLOW)
-        b_que = get_bar(rating_probs[2], Colors.MAGENTA)
-        b_exp = get_bar(rating_probs[3], Colors.RED)
+        fmt_prob = lambda p: "100.0%" if p * 100 >= 100 else f"{p * 100:04.1f}%"
+        b_gen, b_sen, b_que, b_exp = (
+            get_bar(rating_probs[0], Colors.GREEN),
+            get_bar(rating_probs[1], Colors.YELLOW),
+            get_bar(rating_probs[2], Colors.MAGENTA),
+            get_bar(rating_probs[3], Colors.RED),
+        )
         tqdm.write(
             f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} Sen:{b_sen}{fmt_prob(rating_probs[1])} Que:{b_que}{fmt_prob(rating_probs[2])} Exp:{b_exp}{fmt_prob(rating_probs[3])}",
             end="",
@@ -371,26 +345,19 @@ def calculate_rating(
         rating_idx = 0
     else:
         if rating_thresh is not None:
-            nsfw_sum = np.sum(rating_probs[1:])
-            if nsfw_sum > rating_thresh:
-                nsfw_probs = rating_probs[1:]
-                max_nsfw_idx = np.argmax(nsfw_probs)
-                rating_idx = max_nsfw_idx + 1
-            else:
-                rating_idx = 0
+            rating_idx = (
+                np.argmax(rating_probs[1:]) + 1
+                if np.sum(rating_probs[1:]) > rating_thresh
+                else 0
+            )
         else:
             rating_idx = np.argmax(rating_probs)
     rating = tags[rating_idx]
     if rating == "sensitive":
-        if rating_probs[1] < split_thresh:
-            rating = "sensitive_mild"
-        else:
-            rating = "sensitive_high"
-    if (
-        rating == "sensitive"
-        or rating == "sensitive_mild"
-        or rating == "sensitive_high"
-    ) and ignore_sensitive:
+        rating = (
+            "sensitive_mild" if rating_probs[1] < split_thresh else "sensitive_high"
+        )
+    if rating in ["sensitive", "sensitive_mild", "sensitive_high"] and ignore_sensitive:
         rating = "general"
     if fname_disp:
         folder_mapping = APP_CONFIG.get("folder_names", {})
@@ -440,12 +407,12 @@ def run_server(port, use_gpu):
 
 
 def process_images(args):
-    host = args.host
-    port = args.port
-    is_client = args.mode == "client"
-    split_thresh = APP_CONFIG.get("sensitive_split_threshold", 0.50)
-    gen_thresh = APP_CONFIG.get("general_threshold", 0.40)
-    client_timeout = APP_CONFIG.get("client_timeout", 15)
+    host, port, is_client = args.host, args.port, args.mode == "client"
+    split_thresh, gen_thresh, client_timeout = (
+        APP_CONFIG.get("sensitive_split_threshold", 0.50),
+        APP_CONFIG.get("general_threshold", 0.40),
+        APP_CONFIG.get("client_timeout", 15),
+    )
     if not is_client:
         print("[INFO] モデルをロード中...")
         init_global_model(args.gpu)
@@ -462,29 +429,18 @@ def process_images(args):
             reader = csv.reader(f)
             next(reader)
             tags = [row[1] for row in reader]
-    use_recursive = True
-    if args.recursive is not None:
-        use_recursive = args.recursive
-    else:
-        if args.organize:
-            use_recursive = False
-        else:
-            use_recursive = True
+    use_recursive = args.recursive if args.recursive is not None else not args.organize
     target_files = collect_images(args.images, recursive=use_recursive)
     if not target_files:
         print("[WARN] 対象ファイルが見つかりません。")
         if not args.no_tag:
             et_wrapper.stop()
         return
-    processed_count = 0
-    skipped_count = 0
-    organized_count = 0
+    processed_count, skipped_count, organized_count = 0, 0, 0
     pbar = tqdm(target_files, unit="img", ncols=80)
     for img_path in pbar:
         try:
-            rating = None
-            existing_tags = []
-            need_inference = True
+            rating, existing_tags, need_inference = None, [], True
             if not args.no_tag or args.organize:
                 if et_wrapper.running:
                     existing_tags = et_wrapper.get_tags(img_path)
@@ -497,15 +453,12 @@ def process_images(args):
                     if args.organize:
                         found_ratings = [t for t in existing_tags if t in RATING_TAGS]
                         if found_ratings:
-                            rating = found_ratings[0]
-                            need_inference = False
+                            rating, need_inference = found_ratings[0], False
                         else:
                             need_inference = True
                     else:
                         need_inference = False
-            probs = None
-            detected_tags = []
-            final_path = img_path
+            probs, detected_tags, final_path = None, [], img_path
             if need_inference:
                 if is_client:
                     with open(img_path, "rb") as f:
@@ -518,17 +471,16 @@ def process_images(args):
                         if res.status != 200:
                             tqdm.write(f"Server Error: {res.status}")
                             continue
-                        response_body = res.read()
-                        probs = np.array(json.loads(response_body.decode("utf-8")))
+                        probs = np.array(json.loads(res.read().decode("utf-8")))
                 else:
-                    pil_image = Image.open(img_path)
-                    img_input = preprocess(pil_image)
+                    img_input = preprocess(Image.open(img_path))
                     probs = sess_global.run(
                         [label_name_cache], {input_name_cache: img_input}
                     )[0][0]
                 fname_disp = os.path.basename(img_path)
-                if len(fname_disp) > 20:
-                    fname_disp = fname_disp[:17] + "..."
+                fname_disp = (
+                    fname_disp[:17] + "..." if len(fname_disp) > 20 else fname_disp
+                )
                 rating = calculate_rating(
                     probs,
                     tags,
@@ -542,19 +494,13 @@ def process_images(args):
                     if p > args.thresh:
                         detected_tags.append(tags[i])
             if not args.no_tag:
-                should_write = False
-                if args.force:
-                    should_write = True
-                elif not existing_tags:
-                    should_write = True
+                should_write = True if args.force or not existing_tags else False
                 if should_write and detected_tags:
                     if et_wrapper.write_tags(img_path, detected_tags):
                         processed_count += 1
                 elif not should_write:
                     skipped_count += 1
             else:
-                if need_inference:
-                    pass
                 skipped_count += 1
             if args.organize and rating:
                 moved, new_path = organize_file(img_path, rating)
@@ -605,12 +551,11 @@ def main():
         description="WD14 Tagger Universal (日本語版)", add_help=False
     )
     parser.add_argument("images", nargs="*", help="処理対象の画像またはフォルダパス")
-    mode_group = parser.add_argument_group("実行モード")
-    mode_group.add_argument(
+    parser.add_argument_group("実行モード").add_argument(
         "--mode",
         choices=["standalone", "server", "client"],
         default="standalone",
-        help="動作モード (standalone: 通常, server: 待機, client: 送信)",
+        help="動作モード",
     )
     action_group = parser.add_argument_group("アクション設定")
     action_group.add_argument(
@@ -626,46 +571,27 @@ def main():
     )
     conf_group = parser.add_argument_group("判定・システム設定")
     conf_group.add_argument(
-        "--thresh", type=float, default=0.35, help="タグ採用の確信度閾値 (0.35)"
+        "--thresh", type=float, default=0.35, help="タグ採用の確信度閾値"
     )
     conf_group.add_argument("--gpu", action="store_true", help="GPUを使用する")
+    conf_group.add_argument("--force", action="store_true", help="強制再解析")
     conf_group.add_argument(
-        "--force",
-        action="store_true",
-        help="既存タグがあっても強制的に再解析・上書きする",
-    )
-    conf_group.add_argument(
-        "--recursive",
-        action="store_const",
-        const=True,
-        default=None,
-        help="サブフォルダも再帰的に検索する (指定優先)",
+        "--recursive", action="store_const", const=True, default=None, help="再帰検索ON"
     )
     conf_group.add_argument(
         "--no-recursive",
         action="store_const",
         const=False,
         dest="recursive",
-        help="サブフォルダは検索しない (指定優先)",
+        help="再帰検索OFF",
     )
     net_group = parser.add_argument_group("ネットワーク設定")
     net_group.add_argument("--host", default=None, help="サーバーIPアドレス")
     net_group.add_argument("--port", type=int, default=None, help="ポート番号")
     misc_group = parser.add_argument_group("その他・旧機能")
-    misc_group.add_argument(
-        "--rating-thresh",
-        type=float,
-        default=None,
-        help="[Old] R指定タグ合計値による閾値判定",
-    )
-    misc_group.add_argument(
-        "--ignore-sensitive",
-        action="store_true",
-        help="[Old] SensitiveをGeneralとして扱う",
-    )
-    misc_group.add_argument(
-        "--gen-config", action="store_true", help="設定ファイル生成のみ実行"
-    )
+    misc_group.add_argument("--rating-thresh", type=float, default=None)
+    misc_group.add_argument("--ignore-sensitive", action="store_true")
+    misc_group.add_argument("--gen-config", action="store_true")
     misc_group.add_argument("-h", "--help", action="help", help="ヘルプを表示")
     args = parser.parse_args()
     if IS_WINDOWS:
@@ -674,30 +600,33 @@ def main():
         load_config()
         sys.exit(0)
     if args.host is None:
-        saved_hosts = APP_CONFIG.get(
-            "server_hosts", APP_CONFIG.get("server_host", ["localhost"])
-        )
-        if isinstance(saved_hosts, str):
-            saved_hosts = [saved_hosts]
-        if len(saved_hosts) == 1:
-            args.host = saved_hosts[0]
-        elif len(saved_hosts) > 1:
-            print(
-                f"{Colors.CYAN}[INFO] 接続先サーバーが複数登録されています。{Colors.RESET}"
+        if args.mode == "client":
+            saved_hosts = APP_CONFIG.get(
+                "server_hosts", APP_CONFIG.get("server_host", ["localhost"])
             )
-            for i, h in enumerate(saved_hosts):
-                print(f"  {i+1}: {h}")
-            while True:
-                choice = input("接続先を選択してください: ")
-                try:
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(saved_hosts):
-                        args.host = saved_hosts[idx]
-                        break
-                    else:
-                        print("無効な番号じゃ。正しい数値を入力するのじゃ。")
-                except ValueError:
-                    print("数値を入力するのじゃ。")
+            if isinstance(saved_hosts, str):
+                saved_hosts = [saved_hosts]
+            if len(saved_hosts) == 1:
+                args.host = saved_hosts[0]
+            elif len(saved_hosts) > 1:
+                print(
+                    f"{Colors.CYAN}[INFO] 接続先サーバーが複数登録されています。{Colors.RESET}"
+                )
+                for i, h in enumerate(saved_hosts):
+                    print(f"  {i+1}: {h}")
+                while True:
+                    choice = input("接続先を選択してください: ")
+                    try:
+                        idx = int(choice) - 1
+                        if 0 <= idx < len(saved_hosts):
+                            args.host = saved_hosts[idx]
+                            break
+                        else:
+                            print("無効な番号じゃ。正しい数値を入力するのじゃ。")
+                    except ValueError:
+                        print("数値を入力するのじゃ。")
+            else:
+                args.host = "localhost"
         else:
             args.host = "localhost"
     if args.port is None:

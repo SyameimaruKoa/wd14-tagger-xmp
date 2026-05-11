@@ -1,15 +1,17 @@
 #!/bin/bash
 
+# 下にヘルプがあるぞ
+
 # ==========================================
 # WD14 Tagger Universal (Bash Wrapper)
 # ==========================================
 
-SCRIPT_DIR=$(cd $(dirname $0); pwd)
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/embed_tags_universal.py"
 
 # デフォルト値
 USE_GPU=0
-FORCE_TYPE="auto" # auto, nvidia, intel
+FORCE_TYPE="auto" # auto, nvidia, intel, amd
 PY_ARGS=()
 DO_ORGANIZE=0
 DO_TAG=0
@@ -26,6 +28,7 @@ show_help() {
     echo "    -g, --gpu           GPUを使用する（自動判別）"
     echo "    --force-intel       Intel GPUを強制的に使用する"
     echo "    --force-nvidia      NVIDIA GPUを強制的に使用する"
+    echo "    --force-amd         AMD GPUを強制的に使用する"
     echo "    --organize          フォルダ整理のみ行う（タグ付けOFF）"
     echo "    --tag               タグ付けも行う（--organize併用時）"
     echo "    --no-report         レポート作成なし"
@@ -49,6 +52,8 @@ detect_gpu_vendor() {
         echo "nvidia"
     elif [[ "$lspci_out" == *"intel"* ]]; then
         echo "intel"
+    elif [[ "$lspci_out" == *"amd"* ]] || [[ "$lspci_out" == *"advanced micro devices"* ]] || [[ "$lspci_out" == *"radeon"* ]]; then
+        echo "amd"
     else
         echo "none"
     fi
@@ -56,13 +61,15 @@ detect_gpu_vendor() {
 
 # --- 環境セットアップ ---
 setup_env() {
-    local backend=$1 # nvidia, intel, cpu
+    local backend=$1 # nvidia, intel, amd, cpu
     local venv_name="venv_std"
     
     if [ "$backend" = "nvidia" ]; then
         venv_name="venv_gpu"
     elif [ "$backend" = "intel" ]; then
         venv_name="venv_intel"
+    elif [ "$backend" = "amd" ]; then
+        venv_name="venv_amd"
     fi
 
     VENV_DIR="$SCRIPT_DIR/$venv_name"
@@ -75,17 +82,34 @@ setup_env() {
     PIP_CMD="$VENV_DIR/bin/pip"
     
     # 必要なパッケージのインストール
-    # 既にインストール済みか簡易チェックしてもいいが、pipは既存ならスキップしてくれるのでそのまま叩く
-    echo "[INFO] 依存ライブラリを確認中 ($backend)..."
+    echo "[INFO] 依存ライブラリを確認・インストール中 ($backend)..."
     
+    # 失敗したときにすぐ止まるようにエラー処理を追加じゃ
     if [ "$backend" = "nvidia" ]; then
-        $PIP_CMD install onnxruntime-gpu pillow huggingface_hub numpy tqdm > /dev/null 2>&1
+        $PIP_CMD install onnxruntime-gpu pillow huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
     elif [ "$backend" = "intel" ]; then
-        # Intel用 OpenVINO EP
-        $PIP_CMD install onnxruntime-openvino pillow huggingface_hub numpy tqdm > /dev/null 2>&1
+        $PIP_CMD install onnxruntime-openvino pillow huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+    elif [ "$backend" = "amd" ]; then
+        # AMD用 ROCm対応パッケージは「onnxruntime-migraphx」に変更されておるのじゃ
+        $PIP_CMD install onnxruntime-migraphx pillow huggingface_hub numpy tqdm -f https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4/ -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/ || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+        
+        # Ubuntu等の新しいLinux環境では、実行可能スタックのフラグが原因でロードエラーになるため解除するのじゃ
+        SO_FILE=$(find "$VENV_DIR" -name "onnxruntime_pybind11_state.so" | head -n 1)
+        if [ -n "$SO_FILE" ]; then
+            if command -v execstack >/dev/null 2>&1; then
+                execstack -c "$SO_FILE"
+            elif command -v patchelf >/dev/null 2>&1; then
+                patchelf --clear-execstack "$SO_FILE"
+            else
+                echo "[ERROR] セキュリティ制約の回避に必要な execstack または patchelf が見つからぬ！"
+                echo "        Ubuntu 24.04等では古いexecstackは削除されておるため、以下のコマンドで patchelf をインストールしてから再度実行するのじゃ。"
+                echo "        sudo apt install patchelf"
+                exit 1
+            fi
+        fi
     else
         # CPU用
-        $PIP_CMD install onnxruntime pillow huggingface_hub numpy tqdm > /dev/null 2>&1
+        $PIP_CMD install onnxruntime pillow huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
     fi
 }
 
@@ -95,9 +119,8 @@ if [ $# -eq 0 ]; then
     echo "   WD14 Tagger Universal - Setup Mode"
     echo "=========================================="
     echo "引数が指定されなかったため、環境構築のみを行います。"
-    # CPU, NVIDIA, Intel それぞれの環境を作っておく
+    # CPUのみ作っておく
     setup_env "cpu"
-    # GPU環境等は実機に合わせて作るのが無難じゃが、ここではCPUだけ作って終わる
     "$SCRIPT_DIR/venv_std/bin/python" "$PYTHON_SCRIPT" --gen-config
     echo "[INFO] セットアップ完了。GPU環境は --gpu 指定時に構築されます。"
     exit 0
@@ -116,6 +139,7 @@ while [[ $# -gt 0 ]]; do
         -g|--gpu) USE_GPU=1; shift ;;
         --force-intel) USE_GPU=1; FORCE_TYPE="intel"; shift ;;
         --force-nvidia) USE_GPU=1; FORCE_TYPE="nvidia"; shift ;;
+        --force-amd) USE_GPU=1; FORCE_TYPE="amd"; shift ;;
         -f|--force) PY_ARGS+=("--force"); shift ;;
         -p|--path) PY_ARGS+=("$2"); shift 2 ;;
         -H|--host) PY_ARGS+=("--host" "$2"); shift 2 ;;
@@ -142,6 +166,9 @@ if [ $USE_GPU -eq 1 ]; then
     elif [ "$FORCE_TYPE" = "nvidia" ]; then
         echo "[INFO] NVIDIA GPU モードを強制使用します。"
         BACKEND_MODE="nvidia"
+    elif [ "$FORCE_TYPE" = "amd" ]; then
+        echo "[INFO] AMD GPU モードを強制使用します。"
+        BACKEND_MODE="amd"
     else
         # 自動判別
         DETECTED=$(detect_gpu_vendor)
@@ -151,6 +178,9 @@ if [ $USE_GPU -eq 1 ]; then
         elif [ "$DETECTED" = "intel" ]; then
             echo "[INFO] Intel GPU を検出しました。OpenVINOモードで実行します。"
             BACKEND_MODE="intel"
+        elif [ "$DETECTED" = "amd" ]; then
+            echo "[INFO] AMD GPU を検出しました。ROCmモードで実行します。"
+            BACKEND_MODE="amd"
         else
             echo "[WARN] GPUが見つからない、または判別できませんでした。CPUモードで実行します。"
             BACKEND_MODE="cpu"
