@@ -1,6 +1,15 @@
+
 # 実装履歴
 
+## 2026-05-15 (Update 2)
+
+- デフォルトモデルを最新のV3系 (`SmilingWolf/wd-swinv2-tagger-v3`) に変更しました。
+  - `embed_tags_universal.py` の `DEFAULT_CONFIG` を更新。
+- `README.md` に現在利用可能な SmilingWolf 氏のモデル一覧（V3、Large V3、V2）とそれぞれの特徴を追加しました。
+- READMEの推奨モデルの記述を、最新モデルに合わせて更新しました。
+
 ## 2026-05-15
+
 - `avif` 画像フォーマットへの対応を追加しました。
   - `embed_tags_universal.py`: `VALID_EXTS` に `.avif` を追加。PillowがAVIFを読み込めるように `pillow_avif` のインポート処理を追記。
   - `run_tagger.ps1`, `run_tagger.sh`: 環境構築時のpipインストール対象に `pillow-avif-plugin` を追加。

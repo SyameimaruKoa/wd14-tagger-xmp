@@ -13,14 +13,37 @@ Windows (PowerShell) と Linux (Bash) の両方に対応しておる。
 
 ## 推奨モデル
 
-以下が推奨じゃ。
+以下が現在の推奨モデルじゃ。`config.json` やコマンド引数で自由に変更できるぞ。
 
-- デフォルト（バッチ推論対応）: `SmilingWolf/wd-v1-4-swinv2-tagger-v2`
-- 標準（精度/速度バランス）: `SmilingWolf/wd-v1-4-convnext-tagger-v2`
+* **デフォルト (バランス・バッチ推論対応):** `SmilingWolf/wd-swinv2-tagger-v3`
+* **最高精度 (高スペックPC向け):** `SmilingWolf/wd-eva02-large-tagger-v3` または `SmilingWolf/wd-vit-large-tagger-v3`
+* **軽量・高速:** `SmilingWolf/wd-vit-tagger-v3` または `SmilingWolf/wd-convnext-tagger-v3`
 
-迷ったら、デフォルトの `SmilingWolf/wd-v1-4-swinv2-tagger-v2` を推奨じゃ。
+### 利用可能なモデル一覧 (SmilingWolf氏作)
 
-他のモデルを使う場合は `config.json` の `model_repo` / `model_file` / `tags_file` またはコマンド引数で指定できる。
+現在利用可能な主なモデル一覧じゃ。新しいモデルほどタグの網羅性や精度が高い傾向にあるぞ。
+
+#### V3 (最新世代・標準サイズ)
+
+* **`SmilingWolf/wd-swinv2-tagger-v3`** : 当ツールのデフォルト。精度と速度のバランスが良く、バッチ推論にも強いため大量の画像処理に向いておる。
+* **`SmilingWolf/wd-vit-tagger-v3`** : 非常に人気のある軽量・高速モデルじゃ。
+* **`SmilingWolf/wd-convnext-tagger-v3`** : V2時代からあるCNNベースの系譜。標準的な性能じゃな。
+
+#### Large V3 (最新世代・大規模サイズ)
+
+* **`SmilingWolf/wd-eva02-large-tagger-v3`** : 最高クラスの精度を誇る大規模モデルじゃ。細かな装飾まで拾いやすいが、ファイルサイズが大きく推論に少し時間がかかるぞ。
+* **`SmilingWolf/wd-vit-large-tagger-v3`** : 同じく大サイズの高精度モデルじゃ。VRAM/RAMに余裕があるなら試してみるがよい。
+
+#### V2 (旧世代)
+
+* **`SmilingWolf/wd-v1-4-swinv2-tagger-v2`** : 以前のデフォルトモデルじゃ。安定しておるが、タグの種類はV3に劣るのう。
+* **`SmilingWolf/wd-v1-4-moat-tagger-v2`** : V2世代での高精度モデルじゃった。
+* **`SmilingWolf/wd-v1-4-convnext-tagger-v2`** : 旧標準モデルじゃ。
+* **`SmilingWolf/wd-v1-4-vit-tagger-v2`** : 旧軽量モデルじゃな。
+
+他のモデルを使う場合は `config.json` の `model_repo` やコマンド引数 `-ModelRepo` などで指定するのじゃ。
+
+（※ `model_file` や `tags_file` の名前が通常と異なる特殊なモデルを使う場合は、そちらも合わせて指定する必要があるぞ）
 
 ## 使い方 (Windows / PowerShell)
 
@@ -112,16 +135,16 @@ GPUを使う場合は `-Gpu` をつける（推奨）。
 
 ### 設定項目一覧
 
-| **項目名 (key)**            | **デフォルト値**                         | **説明**                                                                                                                                                                                                         |
-| --------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model_repo`                | `"SmilingWolf/wd-v1-4-swinv2-tagger-v2"` | 使用するモデル/タグのリポジトリID。                                                                                                                                                                              |
-| `model_file`                | `"model.onnx"`                           | 使用するモデルファイル名（またはローカルパス）。                                                                                                                                                                 |
-| `tags_file`                 | `"selected_tags.csv"`                    | 使用するタグCSVファイル名（またはローカルパス）。                                                                                                                                                                |
-| `general_threshold`         | `0.40`                                   | **General（全年齢）判定の安全弁** 。``AIが「Generalである確率」がこの値以上なら、たとえ他のR指定スコアが高くても強制的に「General」として扱う。``誤爆（安全な画像をR指定にしてしまうこと）を防ぐための設定じゃ。 |
-| `sensitive_split_threshold` | `0.50`                                   | **Sensitive（軽度の性的表現）の強度分け** 。``Sensitiveタグが付いた画像のうち、スコアがこの値未満なら「mild（R-15程度）」、以上なら「high（R-15強）」としてフォルダを分けることができる。                        |
-| `server_host`               | `"localhost"`                            | サーバーモードやクライアントモードで使うデフォルトのIPアドレス。                                                                                                                                                 |
-| `server_port`               | `5000`                                   | 通信に使用するポート番号。                                                                                                                                                                                       |
-| `folder_names`              | (下記参照)                               | 整理モード (`--organize`) で振り分けられるフォルダ名の設定。                                                                                                                                                     |
+| **項目名 (key)**            | **デフォルト値**                    | **説明**                                                                                                                                                                                                      |
+| --------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model_repo`                | `"SmilingWolf/wd-swinv2-tagger-v3"` | 使用するモデル/タグのリポジトリID。                                                                                                                                                                           |
+| `model_file`                | `"model.onnx"`                      | 使用するモデルファイル名（またはローカルパス）。                                                                                                                                                              |
+| `tags_file`                 | `"selected_tags.csv"`               | 使用するタグCSVファイル名（またはローカルパス）。                                                                                                                                                             |
+| `general_threshold`         | `0.40`                              | **General（全年齢）判定の安全弁**。`AIが「Generalである確率」がこの値以上なら、たとえ他のR指定スコアが高くても強制的に「General」として扱う。`誤爆（安全な画像をR指定にしてしまうこと）を防ぐための設定じゃ。 |
+| `sensitive_split_threshold` | `0.50`                              | **Sensitive（軽度の性的表現）の強度分け**。``Sensitiveタグが付いた画像のうち、スコアがこの値未満なら「mild（R-15程度）」、以上なら「high（R-15強）」としてフォルダを分けることができる。                      |
+| `server_host`               | `"localhost"`                       | サーバーモードやクライアントモードで使うデフォルトのIPアドレス。                                                                                                                                              |
+| `server_port`               | `5000`                              | 通信に使用するポート番号。                                                                                                                                                                                    |
+| `folder_names`              | (下記参照)                          | 整理モード (`--organize`) で振り分けられるフォルダ名の設定。                                                                                                                                                  |
 
 ### folder_names (フォルダ名設定)
 

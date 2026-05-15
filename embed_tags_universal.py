@@ -33,7 +33,7 @@ REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
 COMPARE_REPORT_JSON = os.path.join(os.getcwd(), "compare_report.json")
 COMPARE_REPORT_CSV = os.path.join(os.getcwd(), "compare_report.csv")
 DEFAULT_CONFIG = {
-    "model_repo": "SmilingWolf/wd-v1-4-swinv2-tagger-v2",
+    "model_repo": "SmilingWolf/wd-swinv2-tagger-v3",
     "model_file": "model.onnx",
     "tags_file": "selected_tags.csv",
     "server_hosts": ["localhost", "100,xxx,xxx,xxx"],
