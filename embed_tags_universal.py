@@ -1,4 +1,5 @@
 import argparse, csv, os, sys, subprocess, glob, uuid, shutil, platform, json, io, socket, warnings, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
@@ -271,6 +272,14 @@ def preprocess(image, size=448):
     return np.expand_dims(img_np, 0)
 
 
+def load_and_preprocess(path):
+    try:
+        with Image.open(path) as img:
+            return preprocess(img), None
+    except Exception as e:
+        return None, e
+
+
 def organize_file(file_path, rating):
     folder_mapping = APP_CONFIG.get("folder_names", {})
     folder_name = folder_mapping.get(rating, rating)
@@ -440,97 +449,180 @@ def process_images(args):
         if not args.no_tag:
             et_wrapper.stop()
         return
+    batch_size = args.batch_size if args.batch_size > 0 else 1
+    if is_client and batch_size > 1:
+        print("[WARN] クライアントモードではバッチ推論を使用できません。")
+        batch_size = 1
+    io_workers = args.io_workers
+    if io_workers is None:
+        io_workers = min(4, os.cpu_count() or 1) if batch_size > 1 else 0
+    if io_workers < 0:
+        io_workers = 0
+    if (not is_client) and batch_size > 1:
+        print(f"[INFO] バッチ推論: {batch_size} / IOワーカー: {io_workers}")
     processed_count, skipped_count, organized_count = 0, 0, 0
-    pbar = tqdm(target_files, unit="img", ncols=80)
-    for img_path in pbar:
+    pbar = tqdm(total=len(target_files), unit="img", ncols=80)
+    executor = (
+        ThreadPoolExecutor(max_workers=io_workers)
+        if (not is_client and batch_size > 1 and io_workers > 0)
+        else None
+    )
+
+    def finalize_result(img_path, existing_tags, detected_tags, rating, probs):
+        nonlocal processed_count, skipped_count, organized_count
+        final_path = img_path
+        if not args.no_tag:
+            should_write = True if args.force or not existing_tags else False
+            if should_write and detected_tags:
+                if et_wrapper.write_tags(img_path, detected_tags):
+                    processed_count += 1
+            elif not should_write:
+                skipped_count += 1
+        else:
+            skipped_count += 1
+        if args.organize and rating:
+            moved, new_path = organize_file(img_path, rating)
+            if moved:
+                organized_count += 1
+                final_path = new_path
+        if not args.no_report and probs is not None:
+            REPORT_DATA.append(
+                {
+                    "path": os.path.abspath(final_path),
+                    "rating": rating,
+                    "probs": probs[:4].tolist(),
+                }
+            )
+        pbar.update(1)
+
+    def handle_inference_result(item, probs):
+        fname_disp = os.path.basename(item["path"])
+        fname_disp = fname_disp[:17] + "..." if len(fname_disp) > 20 else fname_disp
+        rating = calculate_rating(
+            probs,
+            tags,
+            args.rating_thresh,
+            split_thresh,
+            args.ignore_sensitive,
+            gen_thresh,
+            fname_disp,
+        )
+        detected_tags = []
+        for i, p in enumerate(probs):
+            if p > args.thresh:
+                detected_tags.append(tags[i])
+        finalize_result(item["path"], item["existing_tags"], detected_tags, rating, probs)
+
+    def run_batch(batch_items):
+        if not batch_items:
+            return
+        paths = [item["path"] for item in batch_items]
+        if executor:
+            results = list(executor.map(load_and_preprocess, paths))
+        else:
+            results = [load_and_preprocess(p) for p in paths]
+        valid_items, inputs = [], []
+        for item, (img_input, err) in zip(batch_items, results):
+            if err is not None:
+                tqdm.write(f"エラー {os.path.basename(item['path'])}: {err}")
+                pbar.update(1)
+                continue
+            valid_items.append(item)
+            inputs.append(img_input)
+        if not valid_items:
+            return
+        batch_input = np.concatenate(inputs, axis=0) if len(inputs) > 1 else inputs[0]
         try:
-            rating, existing_tags, need_inference = None, [], True
-            if not args.no_tag or args.organize:
-                if et_wrapper.running:
-                    existing_tags = et_wrapper.get_tags(img_path)
-            if args.force:
-                need_inference = True
-            elif existing_tags:
-                if args.rating_thresh is not None:
-                    need_inference = True
-                else:
-                    if args.organize:
-                        found_ratings = [t for t in existing_tags if t in RATING_TAGS]
-                        if found_ratings:
-                            rating, need_inference = found_ratings[0], False
-                        else:
-                            need_inference = True
-                    else:
-                        need_inference = False
-            probs, detected_tags, final_path = None, [], img_path
-            if need_inference:
-                if is_client:
-                    with open(img_path, "rb") as f:
-                        img_data = f.read()
-                    req = urllib.request.Request(
-                        server_url, data=img_data, method="POST"
-                    )
-                    req.add_header("Content-Type", "application/octet-stream")
-                    with urllib.request.urlopen(req, timeout=client_timeout) as res:
-                        if res.status != 200:
-                            tqdm.write(f"Server Error: {res.status}")
-                            continue
-                        probs = np.array(json.loads(res.read().decode("utf-8")))
-                else:
-                    img_input = preprocess(Image.open(img_path))
+            batch_probs = sess_global.run(
+                [label_name_cache], {input_name_cache: batch_input}
+            )[0]
+        except Exception as e:
+            tqdm.write(f"[WARN] バッチ推論に失敗: {e} -> 1枚ずつに切り替えます。")
+            for item, img_input in zip(valid_items, inputs):
+                try:
                     probs = sess_global.run(
                         [label_name_cache], {input_name_cache: img_input}
                     )[0][0]
-                fname_disp = os.path.basename(img_path)
-                fname_disp = (
-                    fname_disp[:17] + "..." if len(fname_disp) > 20 else fname_disp
-                )
-                rating = calculate_rating(
-                    probs,
-                    tags,
-                    args.rating_thresh,
-                    split_thresh,
-                    args.ignore_sensitive,
-                    gen_thresh,
-                    fname_disp,
-                )
-                for i, p in enumerate(probs):
-                    if p > args.thresh:
-                        detected_tags.append(tags[i])
-            if not args.no_tag:
-                should_write = True if args.force or not existing_tags else False
-                if should_write and detected_tags:
-                    if et_wrapper.write_tags(img_path, detected_tags):
-                        processed_count += 1
-                elif not should_write:
-                    skipped_count += 1
-            else:
-                skipped_count += 1
-            if args.organize and rating:
-                moved, new_path = organize_file(img_path, rating)
-                if moved:
-                    organized_count += 1
-                    final_path = new_path
-            if not args.no_report and probs is not None:
-                REPORT_DATA.append(
-                    {
-                        "path": os.path.abspath(final_path),
-                        "rating": rating,
-                        "probs": probs[:4].tolist(),
-                    }
-                )
-        except (urllib.error.URLError, socket.timeout) as e:
-            tqdm.write(f"接続エラー(タイムアウト含む): {e}")
-            break
-        except KeyboardInterrupt:
-            print("\n[INFO] 中断されました。")
-            if not args.no_tag:
-                et_wrapper.stop()
-            sys.exit(0)
-        except Exception as e:
-            tqdm.write(f"エラー {os.path.basename(img_path)}: {e}")
-    if not args.no_tag:
-        et_wrapper.stop()
+                    handle_inference_result(item, probs)
+                except Exception as e2:
+                    tqdm.write(f"エラー {os.path.basename(item['path'])}: {e2}")
+                    pbar.update(1)
+            return
+        if len(valid_items) == 1:
+            probs_list = (
+                [batch_probs[0]] if getattr(batch_probs, "ndim", 1) > 1 else [batch_probs]
+            )
+        else:
+            probs_list = batch_probs
+        for item, probs in zip(valid_items, probs_list):
+            handle_inference_result(item, probs)
+
+    pending = []
+    aborted = False
+    try:
+        for img_path in target_files:
+            try:
+                rating, existing_tags, need_inference = None, [], True
+                if not args.no_tag or args.organize:
+                    if et_wrapper.running:
+                        existing_tags = et_wrapper.get_tags(img_path)
+                if args.force:
+                    need_inference = True
+                elif existing_tags:
+                    if args.rating_thresh is not None:
+                        need_inference = True
+                    else:
+                        if args.organize:
+                            found_ratings = [t for t in existing_tags if t in RATING_TAGS]
+                            if found_ratings:
+                                rating, need_inference = found_ratings[0], False
+                            else:
+                                need_inference = True
+                        else:
+                            need_inference = False
+                if need_inference:
+                    if is_client:
+                        with open(img_path, "rb") as f:
+                            img_data = f.read()
+                        req = urllib.request.Request(
+                            server_url, data=img_data, method="POST"
+                        )
+                        req.add_header("Content-Type", "application/octet-stream")
+                        with urllib.request.urlopen(req, timeout=client_timeout) as res:
+                            if res.status != 200:
+                                tqdm.write(f"Server Error: {res.status}")
+                                pbar.update(1)
+                                continue
+                            probs = np.array(json.loads(res.read().decode("utf-8")))
+                        handle_inference_result(
+                            {"path": img_path, "existing_tags": existing_tags}, probs
+                        )
+                    else:
+                        pending.append({"path": img_path, "existing_tags": existing_tags})
+                        if len(pending) >= batch_size:
+                            run_batch(pending[:batch_size])
+                            pending = pending[batch_size:]
+                else:
+                    finalize_result(img_path, existing_tags, [], rating, None)
+            except (urllib.error.URLError, socket.timeout) as e:
+                tqdm.write(f"接続エラー(タイムアウト含む): {e}")
+                aborted = True
+                break
+            except KeyboardInterrupt:
+                print("\n[INFO] 中断されました。")
+                aborted = True
+                sys.exit(0)
+            except Exception as e:
+                tqdm.write(f"エラー {os.path.basename(img_path)}: {e}")
+                pbar.update(1)
+        if not aborted and (not is_client) and pending:
+            run_batch(pending)
+    finally:
+        if executor:
+            executor.shutdown(wait=True)
+        if not args.no_tag:
+            et_wrapper.stop()
+        pbar.close()
     print(
         f"\n[完了] タグ付け: {processed_count}, スキップ: {skipped_count}, 整理: {organized_count}"
     )
@@ -578,6 +670,15 @@ def main():
         "--thresh", type=float, default=0.35, help="タグ採用の確信度閾値"
     )
     conf_group.add_argument("--gpu", action="store_true", help="GPUを使用する")
+    conf_group.add_argument(
+        "--batch-size", type=int, default=1, help="推論バッチサイズ（ローカル時のみ）"
+    )
+    conf_group.add_argument(
+        "--io-workers",
+        type=int,
+        default=None,
+        help="前処理の並列ワーカー数（未指定時は自動）",
+    )
     conf_group.add_argument("--force", action="store_true", help="強制再解析")
     conf_group.add_argument(
         "--recursive", action="store_const", const=True, default=None, help="再帰検索ON"

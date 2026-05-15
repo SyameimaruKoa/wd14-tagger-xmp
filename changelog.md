@@ -7,3 +7,6 @@
 - パッケージインストール処理をスマート化（リファクタリング）
   - 共通ライブラリを `requirements.txt` に分離。
   - カスタムインストールロジック（`pip list` との突き合わせなど）を廃止し、pip標準の依存関係解決と `-r requirements.txt` を活用する形に変更。
+- GPUの遊休時間を減らすため、バッチ推論と前処理並列化を追加しました。
+  - `embed_tags_universal.py`: `--batch-size` と `--io-workers` を追加し、ローカル推論時にまとめて処理できるように変更。
+  - `run_tagger.ps1`, `run_tagger.sh`, `README.md`: 新しいオプションを追記。

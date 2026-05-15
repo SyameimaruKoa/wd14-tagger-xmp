@@ -34,6 +34,8 @@ show_help() {
     echo "    --no-report         レポート作成なし"
     echo "    --recursive         再帰検索ON"
     echo "    --no-recursive      再帰検索OFF"
+    echo "    --batch-size <n>    推論バッチサイズ（ローカル時のみ）"
+    echo "    --io-workers <n>    前処理の並列ワーカー数"
     echo "    -f, --force         既存タグがあっても強制的に再解析・上書きする"
     echo "    --server            サーバーモード"
     echo "    --client            クライアントモード"
@@ -137,6 +139,8 @@ while [[ $# -gt 0 ]]; do
         --no-report) PY_ARGS+=("--no-report"); shift ;;
         --recursive) PY_ARGS+=("--recursive"); shift ;;
         --no-recursive) PY_ARGS+=("--no-recursive"); shift ;;
+        --batch-size) PY_ARGS+=("--batch-size" "$2"); shift 2 ;;
+        --io-workers) PY_ARGS+=("--io-workers" "$2"); shift 2 ;;
         -g|--gpu) USE_GPU=1; shift ;;
         --force-intel) USE_GPU=1; FORCE_TYPE="intel"; shift ;;
         --force-nvidia) USE_GPU=1; FORCE_TYPE="nvidia"; shift ;;

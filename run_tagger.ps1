@@ -44,6 +44,14 @@
     【GPU使用】 (スイッチ)
     GPUを使用して高速化する。
 
+.PARAMETER BatchSize
+    【バッチサイズ】 (数値)
+    推論をまとめて行う枚数。GPUが暇な場合に効果的。
+
+.PARAMETER IoWorkers
+    【前処理ワーカー数】 (数値)
+    画像の読み込み・前処理を並列化するワーカー数。
+
 .PARAMETER Force
     【強制実行】 (スイッチ)
     既存タグがあっても強制的に再解析・上書きする。
@@ -103,6 +111,8 @@ param (
     [switch]$NoRecursive,
     [float]$Thresh = 0.35,
     [switch]$Gpu,
+    [int]$BatchSize,
+    [int]$IoWorkers,
     [switch]$Force,
     [switch]$Server,
     [switch]$Client,
@@ -224,6 +234,8 @@ if ($NoRecursive) { $PyArgs += "--no-recursive" }
 # その他パラメータ
 if ($Thresh -ne 0.35) { $PyArgs += ("--thresh", $Thresh) }
 if ($Gpu) { $PyArgs += "--gpu" }
+if ($PSBoundParameters.ContainsKey('BatchSize')) { $PyArgs += ("--batch-size", $BatchSize) }
+if ($PSBoundParameters.ContainsKey('IoWorkers')) { $PyArgs += ("--io-workers", $IoWorkers) }
 if ($Force) { $PyArgs += "--force" }
 
 if ($HostIP) { $PyArgs += ("--host", $HostIP) }
