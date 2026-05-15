@@ -15,3 +15,4 @@
   - `run_tagger.ps1`, `run_tagger.sh`, `README.md`, `config.json`: 新しい項目とヘルプを追記。
 - README に推奨モデルを追記しました。
 - README にバッチ推論対応モデル（swinv2）の推奨を追記しました。
+- デフォルトモデルを `SmilingWolf/wd-v1-4-swinv2-tagger-v2` に変更しました。

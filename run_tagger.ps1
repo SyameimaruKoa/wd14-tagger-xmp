@@ -52,6 +52,18 @@
     【前処理ワーカー数】 (数値)
     画像の読み込み・前処理を並列化するワーカー数（デフォルト: 自動）。
 
+.PARAMETER ModelRepo
+    【モデルリポジトリ】 (文字列)
+    HuggingFaceのモデル/タグのリポジトリID。
+
+.PARAMETER ModelFile
+    【モデルファイル】 (文字列)
+    モデルファイル名またはローカルパス。
+
+.PARAMETER TagsFile
+    【タグCSV】 (文字列)
+    タグCSVファイル名またはローカルパス。
+
 .PARAMETER Force
     【強制実行】 (スイッチ)
     既存タグがあっても強制的に再解析・上書きする。
@@ -113,6 +125,9 @@ param (
     [switch]$Gpu,
     [int]$BatchSize,
     [int]$IoWorkers,
+    [string]$ModelRepo,
+    [string]$ModelFile,
+    [string]$TagsFile,
     [switch]$Force,
     [switch]$Server,
     [switch]$Client,
@@ -149,6 +164,9 @@ function Show-Help {
     Write-Host "    -Thresh <0.0-1.0>     タグ採用確率の閾値（デフォルト: 0.35）"
     Write-Host "    -BatchSize <n>        推論バッチサイズ"
     Write-Host "    -IoWorkers <n>        前処理の並列ワーカー数"
+    Write-Host "    -ModelRepo <repo>     モデル/タグのHFリポジトリID"
+    Write-Host "    -ModelFile <file>     モデルファイル名またはパス"
+    Write-Host "    -TagsFile <file>      タグCSVファイル名またはパス"
     Write-Host "    -Force                既存タグがあっても強制的に再解析・上書き"
     Write-Host "    -Server               サーバーモード（推論待機）"
     Write-Host "    -Client               クライアントモード"
@@ -272,6 +290,9 @@ if ($Thresh -ne 0.35) { $PyArgs += ("--thresh", $Thresh) }
 if ($Gpu) { $PyArgs += "--gpu" }
 if ($PSBoundParameters.ContainsKey('BatchSize')) { $PyArgs += ("--batch-size", $BatchSize) }
 if ($PSBoundParameters.ContainsKey('IoWorkers')) { $PyArgs += ("--io-workers", $IoWorkers) }
+if ($PSBoundParameters.ContainsKey('ModelRepo')) { $PyArgs += ("--model-repo", $ModelRepo) }
+if ($PSBoundParameters.ContainsKey('ModelFile')) { $PyArgs += ("--model-file", $ModelFile) }
+if ($PSBoundParameters.ContainsKey('TagsFile')) { $PyArgs += ("--tags-file", $TagsFile) }
 if ($Force) { $PyArgs += "--force" }
 
 if ($HostIP) { $PyArgs += ("--host", $HostIP) }

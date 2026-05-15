@@ -30,7 +30,12 @@ RATING_TAGS = ["general", "sensitive", "questionable", "explicit"]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
+COMPARE_REPORT_JSON = os.path.join(os.getcwd(), "compare_report.json")
+COMPARE_REPORT_CSV = os.path.join(os.getcwd(), "compare_report.csv")
 DEFAULT_CONFIG = {
+    "model_repo": "SmilingWolf/wd-v1-4-swinv2-tagger-v2",
+    "model_file": "model.onnx",
+    "tags_file": "selected_tags.csv",
     "server_hosts": ["localhost", "100,xxx,xxx,xxx"],
     "server_port": 5000,
     "client_timeout": 15,
@@ -114,6 +119,7 @@ def get_bar(prob, color, width=5):
 
 
 REPORT_DATA = []
+COMPARE_DATA = []
 
 
 class ExifToolWrapper:
@@ -223,15 +229,51 @@ def get_batch_limit(session):
     return None
 
 
-def load_model_and_tags(use_gpu=False):
-    global MODEL_BATCH_LIMIT
-    repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
-    model_path = hf_hub_download(repo_id=repo_id, filename="model.onnx")
-    tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
+def resolve_local_path(filename):
+    if not filename:
+        return None
+    candidates = []
+    if os.path.isabs(filename):
+        candidates.append(filename)
+    else:
+        candidates.append(os.path.join(os.getcwd(), filename))
+        candidates.append(os.path.join(SCRIPT_DIR, filename))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
+def resolve_hf_or_local(repo_id, filename, label):
+    local_path = resolve_local_path(filename)
+    if local_path:
+        return local_path
+    if os.path.isabs(filename or ""):
+        raise FileNotFoundError(f"{label}が見つかりません: {filename}")
+    if not repo_id:
+        raise ValueError(f"{label}の取得先リポジトリIDが未指定です。")
+    return hf_hub_download(repo_id=repo_id, filename=filename)
+
+
+def load_tags_from_path(tags_path):
     with open(tags_path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
         next(reader)
-        tags = [row[1] for row in reader]
+        return [row[1] for row in reader]
+
+
+def load_model_and_tags(use_gpu=False, model_repo=None, model_file=None, tags_file=None):
+    global MODEL_BATCH_LIMIT
+    repo_id = model_repo or DEFAULT_CONFIG.get("model_repo")
+    model_file = model_file or DEFAULT_CONFIG.get("model_file")
+    tags_file = tags_file or DEFAULT_CONFIG.get("tags_file")
+    try:
+        model_path = resolve_hf_or_local(repo_id, model_file, "モデル")
+        tags_path = resolve_hf_or_local(repo_id, tags_file, "タグCSV")
+    except Exception as e:
+        print(f"[ERROR] モデル/タグの読み込みに失敗しました: {e}")
+        sys.exit(1)
+    tags = load_tags_from_path(tags_path)
     providers = []
     if use_gpu:
         available_providers = ort.get_available_providers()
@@ -274,11 +316,11 @@ sess_global, tags_global, input_name_cache, label_name_cache = None, None, None,
 MODEL_BATCH_LIMIT = None
 
 
-def init_global_model(use_gpu):
+def init_global_model(use_gpu, model_repo, model_file, tags_file):
     global sess_global, tags_global, input_name_cache, label_name_cache
     if sess_global is None:
         sess_global, tags_global, input_name_cache, label_name_cache = (
-            load_model_and_tags(use_gpu)
+            load_model_and_tags(use_gpu, model_repo, model_file, tags_file)
         )
 
 
@@ -424,8 +466,8 @@ class TagServerHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
-def run_server(port, use_gpu):
-    init_global_model(use_gpu)
+def run_server(port, use_gpu, model_repo, model_file, tags_file):
+    init_global_model(use_gpu, model_repo, model_file, tags_file)
     server_address = ("0.0.0.0", port)
     httpd = HTTPServer(server_address, TagServerHandler)
     print(f"\n[INFO] サーバー稼働中 Port: {port}")
@@ -444,7 +486,7 @@ def process_images(args):
     )
     if not is_client:
         print("[INFO] モデルをロード中...")
-        init_global_model(args.gpu)
+        init_global_model(args.gpu, args.model_repo, args.model_file, args.tags_file)
     server_url = f"http://{host}:{port}"
     if is_client:
         print(f"[INFO] サーバーに接続: {server_url} (Timeout: {client_timeout}s)")
@@ -452,12 +494,14 @@ def process_images(args):
         et_wrapper.start()
     tags = tags_global
     if is_client:
-        repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
-        tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
-        with open(tags_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            next(reader)
-            tags = [row[1] for row in reader]
+        try:
+            tags_path = resolve_hf_or_local(args.model_repo, args.tags_file, "タグCSV")
+        except Exception as e:
+            print(f"[ERROR] タグCSVの読み込みに失敗しました: {e}")
+            if not args.no_tag:
+                et_wrapper.stop()
+            return
+        tags = load_tags_from_path(tags_path)
     use_recursive = args.recursive if args.recursive is not None else not args.organize
     target_files = collect_images(args.images, recursive=use_recursive)
     if not target_files:
@@ -720,6 +764,22 @@ def main():
         dest="recursive",
         help="再帰検索OFF",
     )
+    model_group = parser.add_argument_group("モデル設定")
+    model_group.add_argument(
+        "--model-repo",
+        default=None,
+        help="モデル/タグのHFリポジトリID（未指定時はconfig.jsonのmodel_repo）",
+    )
+    model_group.add_argument(
+        "--model-file",
+        default=None,
+        help="モデルファイル名またはパス（未指定時はconfig.jsonのmodel_file）",
+    )
+    model_group.add_argument(
+        "--tags-file",
+        default=None,
+        help="タグCSVファイル名またはパス（未指定時はconfig.jsonのtags_file）",
+    )
     net_group = parser.add_argument_group("ネットワーク設定")
     net_group.add_argument("--host", default=None, help="サーバーIPアドレス")
     net_group.add_argument("--port", type=int, default=None, help="ポート番号")
@@ -734,6 +794,16 @@ def main():
     if args.gen_config:
         load_config()
         sys.exit(0)
+    if args.model_repo is None:
+        args.model_repo = APP_CONFIG.get(
+            "model_repo", DEFAULT_CONFIG.get("model_repo")
+        )
+    if args.model_file is None:
+        args.model_file = APP_CONFIG.get(
+            "model_file", DEFAULT_CONFIG.get("model_file")
+        )
+    if args.tags_file is None:
+        args.tags_file = APP_CONFIG.get("tags_file", DEFAULT_CONFIG.get("tags_file"))
     if args.host is None:
         if args.mode == "client":
             saved_hosts = APP_CONFIG.get(
@@ -767,7 +837,7 @@ def main():
     if args.port is None:
         args.port = APP_CONFIG.get("server_port", 5000)
     if args.mode == "server":
-        run_server(args.port, args.gpu)
+        run_server(args.port, args.gpu, args.model_repo, args.model_file, args.tags_file)
     else:
         if not args.images:
             print(
