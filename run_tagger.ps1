@@ -116,7 +116,7 @@ param (
     [Alias('h')]
     [switch]$Help,
 
-    [Parameter(ValueFromRemainingArguments=$true)]
+    [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$RemainingArgs
 )
 
@@ -142,11 +142,12 @@ function Prepare-Environment {
     if ($IsWindows -and $UseGpu) {
         $EnvName = "GPU (DirectML)"
         $TargetVenv = Join-Path $ScriptDir "venv_gpu"
-        $Requirements = @("onnxruntime-directml", "pillow", "pillow-avif-plugin", "huggingface_hub", "numpy", "tqdm")
-    } else {
+        $OnnxPackage = "onnxruntime-directml"
+    }
+    else {
         $EnvName = "Standard (CPU)"
         $TargetVenv = Join-Path $ScriptDir "venv_std"
-        $Requirements = @("onnxruntime", "pillow", "pillow-avif-plugin", "huggingface_hub", "numpy", "tqdm")
+        $OnnxPackage = "onnxruntime"
     }
     
     Write-Host "[INFO] 環境確認: $EnvName" -ForegroundColor Cyan
@@ -159,19 +160,17 @@ function Prepare-Environment {
         $Bin = Join-Path $TargetVenv "Scripts"
         $PyEx = Join-Path $Bin "python.exe"
         $PipEx = Join-Path $Bin "pip.exe"
-    } else {
+    }
+    else {
         $Bin = Join-Path $TargetVenv "bin"
         $PyEx = Join-Path $Bin "python"
         $PipEx = Join-Path $Bin "pip"
     }
 
-    $Installed = & $PipEx list 2>&1
-    foreach ($req in $Requirements) {
-        if ($Installed -notmatch $req) {
-            Write-Host "  -> ライブラリインストール: $req" -ForegroundColor Yellow
-            & $PipEx install $req | Out-Null
-        }
-    }
+    Write-Host "  -> ライブラリの確認・インストールを行います..." -ForegroundColor Yellow
+    $ReqFile = Join-Path $ScriptDir "requirements.txt"
+    & $PipEx install -r $ReqFile $OnnxPackage -q | Out-Null
+    
     return $PyEx
 }
 #endregion
@@ -209,7 +208,8 @@ else { $PyArgs += ("--mode", "standalone") }
 if ($Organize) {
     $PyArgs += "--organize"
     if (-not $Tag) { $PyArgs += "--no-tag" }
-} else {
+}
+else {
     # 通常モード -> Tag指定は不要(デフォルトON)。No-Tag指定があれば...無いので実装不要
     # もし将来的に「タグなし・整理なし・レポートのみ」をするなら --no-tag 引数が必要だが
     # 今回のPSラッパーでは Organize がスイッチになっているため自動制御する

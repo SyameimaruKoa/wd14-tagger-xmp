@@ -1,0 +1,5 @@
+pillow
+pillow-avif-plugin
+huggingface_hub
+numpy
+tqdm
