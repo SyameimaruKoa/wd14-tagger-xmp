@@ -2,6 +2,10 @@ import argparse, csv, os, sys, subprocess, glob, uuid, shutil, platform, json, i
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
+try:
+    import pillow_avif
+except ImportError:
+    pass
 from huggingface_hub import hf_hub_download
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -20,7 +24,7 @@ SYSTEM_OS, IS_WINDOWS, IS_LINUX = (
     platform.system() == "Linux",
 )
 EXIFTOOL_CMD = "exiftool"
-VALID_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".bmp")
+VALID_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".bmp", ".avif")
 RATING_TAGS = ["general", "sensitive", "questionable", "explicit"]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")

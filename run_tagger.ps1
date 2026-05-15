@@ -142,11 +142,11 @@ function Prepare-Environment {
     if ($IsWindows -and $UseGpu) {
         $EnvName = "GPU (DirectML)"
         $TargetVenv = Join-Path $ScriptDir "venv_gpu"
-        $Requirements = @("onnxruntime-directml", "pillow", "huggingface_hub", "numpy", "tqdm")
+        $Requirements = @("onnxruntime-directml", "pillow", "pillow-avif-plugin", "huggingface_hub", "numpy", "tqdm")
     } else {
         $EnvName = "Standard (CPU)"
         $TargetVenv = Join-Path $ScriptDir "venv_std"
-        $Requirements = @("onnxruntime", "pillow", "huggingface_hub", "numpy", "tqdm")
+        $Requirements = @("onnxruntime", "pillow", "pillow-avif-plugin", "huggingface_hub", "numpy", "tqdm")
     }
     
     Write-Host "[INFO] 環境確認: $EnvName" -ForegroundColor Cyan

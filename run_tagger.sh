@@ -86,12 +86,12 @@ setup_env() {
     
     # 失敗したときにすぐ止まるようにエラー処理を追加じゃ
     if [ "$backend" = "nvidia" ]; then
-        $PIP_CMD install onnxruntime-gpu pillow huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+        $PIP_CMD install onnxruntime-gpu pillow pillow-avif-plugin huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
     elif [ "$backend" = "intel" ]; then
-        $PIP_CMD install onnxruntime-openvino pillow huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+        $PIP_CMD install onnxruntime-openvino pillow pillow-avif-plugin huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
     elif [ "$backend" = "amd" ]; then
         # AMD用 ROCm対応パッケージは「onnxruntime-migraphx」に変更されておるのじゃ
-        $PIP_CMD install onnxruntime-migraphx pillow huggingface_hub numpy tqdm -f https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4/ -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/ || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+        $PIP_CMD install onnxruntime-migraphx pillow pillow-avif-plugin huggingface_hub numpy tqdm -f https://repo.radeon.com/rocm/manylinux/rocm-rel-6.4/ -f https://repo.radeon.com/rocm/manylinux/rocm-rel-7.2.1/ || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
         
         # Ubuntu等の新しいLinux環境では、実行可能スタックのフラグが原因でロードエラーになるため解除するのじゃ
         SO_FILE=$(find "$VENV_DIR" -name "onnxruntime_pybind11_state.so" | head -n 1)
@@ -109,7 +109,7 @@ setup_env() {
         fi
     else
         # CPU用
-        $PIP_CMD install onnxruntime pillow huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+        $PIP_CMD install onnxruntime pillow pillow-avif-plugin huggingface_hub numpy tqdm || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
     fi
 }
 
