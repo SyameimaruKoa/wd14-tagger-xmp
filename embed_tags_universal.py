@@ -210,7 +210,21 @@ class ExifToolWrapper:
 et_wrapper = ExifToolWrapper()
 
 
+def get_batch_limit(session):
+    try:
+        shape = session.get_inputs()[0].shape
+    except Exception:
+        return None
+    if not shape:
+        return None
+    batch_dim = shape[0]
+    if isinstance(batch_dim, (int, np.integer)):
+        return int(batch_dim)
+    return None
+
+
 def load_model_and_tags(use_gpu=False):
+    global MODEL_BATCH_LIMIT
     repo_id = "SmilingWolf/wd-v1-4-convnext-tagger-v2"
     model_path = hf_hub_download(repo_id=repo_id, filename="model.onnx")
     tags_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
@@ -252,10 +266,12 @@ def load_model_and_tags(use_gpu=False):
         sess = ort.InferenceSession(
             model_path, sess_options=sess_options, providers=["CPUExecutionProvider"]
         )
+    MODEL_BATCH_LIMIT = get_batch_limit(sess)
     return sess, tags, sess.get_inputs()[0].name, sess.get_outputs()[0].name
 
 
 sess_global, tags_global, input_name_cache, label_name_cache = None, None, None, None
+MODEL_BATCH_LIMIT = None
 
 
 def init_global_model(use_gpu):
@@ -453,10 +469,21 @@ def process_images(args):
     if is_client and batch_size > 1:
         print("[WARN] クライアントモードではバッチ推論を使用できません。")
         batch_size = 1
+    if (not is_client) and MODEL_BATCH_LIMIT is not None:
+        if MODEL_BATCH_LIMIT <= 1 and batch_size > 1:
+            print(
+                "[WARN] このモデルはバッチ推論に非対応のため、batch-size を 1 に変更します。"
+            )
+            batch_size = 1
+        elif batch_size > MODEL_BATCH_LIMIT:
+            print(
+                f"[WARN] batch-size がモデル上限({MODEL_BATCH_LIMIT})を超えているため、{MODEL_BATCH_LIMIT} に変更します。"
+            )
+            batch_size = MODEL_BATCH_LIMIT
     io_workers = args.io_workers
-    if io_workers is None:
-        io_workers = min(4, os.cpu_count() or 1) if batch_size > 1 else 0
-    if io_workers < 0:
+    if io_workers == -1:
+        io_workers = max(2, min(4, (os.cpu_count() or 1) // 2)) if batch_size > 1 else 0
+    elif io_workers is not None and io_workers < 0:
         io_workers = 0
     if (not is_client) and batch_size > 1:
         print(f"[INFO] バッチ推論: {batch_size} / IOワーカー: {io_workers}")
@@ -671,13 +698,16 @@ def main():
     )
     conf_group.add_argument("--gpu", action="store_true", help="GPUを使用する")
     conf_group.add_argument(
-        "--batch-size", type=int, default=1, help="推論バッチサイズ（ローカル時のみ）"
+        "--batch-size",
+        type=int,
+        default=4,
+        help="推論バッチサイズ（ローカル時のみ、デフォルト: 4 / 非対応時は自動で 1）",
     )
     conf_group.add_argument(
         "--io-workers",
         type=int,
-        default=None,
-        help="前処理の並列ワーカー数（未指定時は自動）",
+        default=-1,
+        help="前処理の並列ワーカー数（デフォルト: -1=自動）",
     )
     conf_group.add_argument("--force", action="store_true", help="強制再解析")
     conf_group.add_argument(

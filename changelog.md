@@ -8,5 +8,5 @@
   - 共通ライブラリを `requirements.txt` に分離。
   - カスタムインストールロジック（`pip list` との突き合わせなど）を廃止し、pip標準の依存関係解決と `-r requirements.txt` を活用する形に変更。
 - GPUの遊休時間を減らすため、バッチ推論と前処理並列化を追加しました。
-  - `embed_tags_universal.py`: `--batch-size` と `--io-workers` を追加し、ローカル推論時にまとめて処理できるように変更。
-  - `run_tagger.ps1`, `run_tagger.sh`, `README.md`: 新しいオプションを追記。
+  - `embed_tags_universal.py`: `--batch-size` と `--io-workers` を追加し、ローカル推論時にまとめて処理できるように変更。デフォルトでバッチサイズ 4、IO ワーカー自動計算で並列化を有効化。モデルがバッチ非対応の場合は自動で 1 にフォールバック。
+  - `run_tagger.ps1`, `run_tagger.sh`, `README.md`: 新しいオプションを追記し、デフォルト値とフォールバックの説明を追加。

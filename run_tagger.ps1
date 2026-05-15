@@ -46,11 +46,11 @@
 
 .PARAMETER BatchSize
     【バッチサイズ】 (数値)
-    推論をまとめて行う枚数。GPUが暇な場合に効果的。
+    推論をまとめて行う枚数（デフォルト: 4）。モデル非対応時は自動で 1 になる。
 
 .PARAMETER IoWorkers
     【前処理ワーカー数】 (数値)
-    画像の読み込み・前処理を並列化するワーカー数。
+    画像の読み込み・前処理を並列化するワーカー数（デフォルト: 自動）。
 
 .PARAMETER Force
     【強制実行】 (スイッチ)
@@ -132,10 +132,46 @@ param (
 
 #region Help Function
 function Show-Help {
-    Get-Help $MyInvocation.MyCommand.Path -Detailed
+    Write-Host "WD14 Tagger Universal (日本語ヘルプ)" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "使い方: .\run_tagger.ps1 [オプション] [パス]" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  引数なしで実行すると「環境構築モード」となり、セットアップのみを行います。" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "主なオプション:" -ForegroundColor Yellow
+    Write-Host "    -Path <path>          処理対象ファイル/フォルダ"
+    Write-Host "    -Gpu                  GPUを使用する（Windows: DirectML）"
+    Write-Host "    -Organize             フォルダ整理のみ行う（タグ付けOFF）"
+    Write-Host "    -Tag                  タグ付けも行う（-Organize併用時）"
+    Write-Host "    -NoReport             レポート作成なし"
+    Write-Host "    -Recursive            再帰検索ON"
+    Write-Host "    -NoRecursive          再帰検索OFF"
+    Write-Host "    -Thresh <0.0-1.0>     タグ採用確率の閾値（デフォルト: 0.35）"
+    Write-Host "    -BatchSize <n>        推論バッチサイズ"
+    Write-Host "    -IoWorkers <n>        前処理の並列ワーカー数"
+    Write-Host "    -Force                既存タグがあっても強制的に再解析・上書き"
+    Write-Host "    -Server               サーバーモード（推論待機）"
+    Write-Host "    -Client               クライアントモード"
+    Write-Host "    -HostIP <ip>          サーバーのIPアドレス"
+    Write-Host "    -Port <port>          ポート番号"
+    Write-Host "    -Help (-h, --help)    このヘルプを表示"
+    Write-Host ""
+    Write-Host "実行例:" -ForegroundColor Yellow
+    Write-Host "    # 初回セットアップ（何もしない）"
+    Write-Host "    .\run_tagger.ps1"
+    Write-Host ""
+    Write-Host "    # 通常実行（タグ付け＋レポート＋GPU）"
+    Write-Host "    .\run_tagger.ps1 -Path C:\Images -Gpu"
+    Write-Host ""
+    Write-Host "    # フォルダ整理のみ（タグ付けなし）"
+    Write-Host "    .\run_tagger.ps1 -Path C:\Images -Organize"
+    Write-Host ""
+    Write-Host "    # 全部入り（タグ付け＋整理＋レポート＋GPU）"
+    Write-Host "    .\run_tagger.ps1 -Path C:\Images -Organize -Tag -Gpu"
+    Write-Host ""
 }
 
-if ($Help -or ($RemainingArgs -contains '--help')) { Show-Help; exit }
+if ($Help -or ($RemainingArgs -contains '--help') -or ($RemainingArgs -contains '-h')) { Show-Help; exit }
 #endregion
 
 #region Environment Setup
