@@ -26,7 +26,14 @@ SYSTEM_OS, IS_WINDOWS, IS_LINUX = (
 )
 EXIFTOOL_CMD = "exiftool"
 VALID_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".bmp", ".avif")
-RATING_TAGS = ["general", "sensitive", "questionable", "explicit"]
+RATING_TAGS = [
+    "general",
+    "sensitive",
+    "sensitive_mild",
+    "sensitive_high",
+    "questionable",
+    "explicit",
+]
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
@@ -340,7 +347,12 @@ def load_and_preprocess(path):
 
 def organize_file(file_path, rating):
     folder_mapping = APP_CONFIG.get("folder_names", {})
-    folder_name = folder_mapping.get(rating, rating)
+    # Try direct mapping first. If not found, fall back to base rating
+    # (e.g. map "sensitive_mild"/"sensitive_high" using "sensitive" key)
+    folder_name = folder_mapping.get(rating)
+    if folder_name is None:
+        base = rating.split("_")[0] if isinstance(rating, str) and "_" in rating else rating
+        folder_name = folder_mapping.get(base, rating)
     try:
         abs_path = os.path.abspath(file_path)
         dir_name, file_name = os.path.dirname(abs_path), os.path.basename(abs_path)
