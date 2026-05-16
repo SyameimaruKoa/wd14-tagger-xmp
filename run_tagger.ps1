@@ -196,31 +196,55 @@ if ($Help -or ($RemainingArgs -contains '--help') -or ($RemainingArgs -contains 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonScript = Join-Path $ScriptDir "embed_tags_universal.py"
 
-$IsWindows = $true
+$IsWindowsOS = $true
 if ($PSVersionTable.PSVersion.Major -ge 6) {
-    if ([System.OperatingSystem]::IsLinux()) { $IsWindows = $false }
+    if ([System.OperatingSystem]::IsLinux()) { $IsWindowsOS = $false }
 }
 
 function Prepare-Environment {
-    param ([bool]$UseGpu)
-    if ($IsWindows -and $UseGpu) {
-        $EnvName = "GPU (DirectML)"
-        $TargetVenv = Join-Path $ScriptDir "venv_gpu"
-        $OnnxPackage = "onnxruntime-directml"
-    }
-    else {
-        $EnvName = "Standard (CPU)"
-        $TargetVenv = Join-Path $ScriptDir "venv_std"
-        $OnnxPackage = "onnxruntime"
+    param ([bool]$UseGpu, [bool]$IsClient)
+    
+    if ($IsClient) {
+        if (Test-Path (Join-Path $ScriptDir "venv_gpu")) {
+            $EnvName = "Client (流用 venv_gpu)"
+            $TargetVenv = Join-Path $ScriptDir "venv_gpu"
+            $OnnxPackage = "onnxruntime-directml"
+        }
+        elseif (Test-Path (Join-Path $ScriptDir "venv_std")) {
+            $EnvName = "Client (流用 venv_std)"
+            $TargetVenv = Join-Path $ScriptDir "venv_std"
+            $OnnxPackage = "onnxruntime"
+        }
+        else {
+            $EnvName = "Client (軽量)"
+            $TargetVenv = Join-Path $ScriptDir "venv_client"
+            $OnnxPackage = ""
+        }
+    } else {
+        if ($IsWindowsOS -and $UseGpu) {
+            $EnvName = "GPU (DirectML)"
+            $TargetVenv = Join-Path $ScriptDir "venv_gpu"
+            $OnnxPackage = "onnxruntime-directml"
+        }
+        elseif (-not $UseGpu -and (Test-Path (Join-Path $ScriptDir "venv_gpu"))) {
+            $EnvName = "CPU (流用 venv_gpu)"
+            $TargetVenv = Join-Path $ScriptDir "venv_gpu"
+            $OnnxPackage = "onnxruntime-directml"
+        }
+        else {
+            $EnvName = "Standard (CPU)"
+            $TargetVenv = Join-Path $ScriptDir "venv_std"
+            $OnnxPackage = "onnxruntime"
+        }
     }
     
     Write-Host "[INFO] 環境確認: $EnvName" -ForegroundColor Cyan
     if (-not (Test-Path $TargetVenv)) {
         Write-Host "  -> 仮想環境を作成中..." -ForegroundColor Yellow
-        if ($IsWindows) { python -m venv $TargetVenv } else { python3 -m venv $TargetVenv }
+        if ($IsWindowsOS) { python -m venv $TargetVenv } else { python3 -m venv $TargetVenv }
     }
     
-    if ($IsWindows) {
+    if ($IsWindowsOS) {
         $Bin = Join-Path $TargetVenv "Scripts"
         $PyEx = Join-Path $Bin "python.exe"
         $PipEx = Join-Path $Bin "pip.exe"
@@ -233,7 +257,11 @@ function Prepare-Environment {
 
     Write-Host "  -> ライブラリの確認・インストールを行います..." -ForegroundColor Yellow
     $ReqFile = Join-Path $ScriptDir "requirements.txt"
-    & $PipEx install -r $ReqFile $OnnxPackage -q | Out-Null
+    if ($OnnxPackage) {
+        & $PipEx install -r $ReqFile $OnnxPackage -q | Out-Null
+    } else {
+        & $PipEx install -r $ReqFile -q | Out-Null
+    }
     
     return $PyEx
 }
@@ -251,13 +279,13 @@ if ($PSBoundParameters.Count -eq 0 -and (-not $RemainingArgs)) {
     Write-Host "使い方がわからない場合は -Help を参照するのじゃ。"
     
     # Config生成のために一度CPU環境で実行
-    $Py = Prepare-Environment -UseGpu $false
+    $Py = Prepare-Environment -UseGpu $false -IsClient $false
     & $Py $PythonScript --gen-config
     exit
 }
 
 # 環境準備
-$VenvPython = Prepare-Environment -UseGpu $Gpu
+$VenvPython = Prepare-Environment -UseGpu $Gpu -IsClient $Client
 
 # Python引数構築
 $PyArgs = @($PythonScript)

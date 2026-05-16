@@ -15,6 +15,7 @@ FORCE_TYPE="auto" # auto, nvidia, intel, amd
 PY_ARGS=()
 DO_ORGANIZE=0
 DO_TAG=0
+IS_CLIENT=0
 
 show_help() {
     echo "WD14 Tagger Universal (日本語ヘルプ)"
@@ -66,15 +67,48 @@ detect_gpu_vendor() {
 
 # --- 環境セットアップ ---
 setup_env() {
-    local backend=$1 # nvidia, intel, amd, cpu
-    local venv_name="venv_std"
+    local backend=$1 # nvidia, intel, amd, cpu, client
+    local is_client=$2
+    local venv_name=""
     
-    if [ "$backend" = "nvidia" ]; then
-        venv_name="venv_gpu"
-    elif [ "$backend" = "intel" ]; then
-        venv_name="venv_intel"
-    elif [ "$backend" = "amd" ]; then
-        venv_name="venv_amd"
+    if [ "$is_client" = "1" ]; then
+        if [ -d "$SCRIPT_DIR/venv_gpu" ]; then
+            venv_name="venv_gpu"
+            backend="nvidia"
+        elif [ -d "$SCRIPT_DIR/venv_intel" ]; then
+            venv_name="venv_intel"
+            backend="intel"
+        elif [ -d "$SCRIPT_DIR/venv_amd" ]; then
+            venv_name="venv_amd"
+            backend="amd"
+        elif [ -d "$SCRIPT_DIR/venv_std" ]; then
+            venv_name="venv_std"
+            backend="cpu"
+        else
+            venv_name="venv_client"
+            backend="client"
+        fi
+    elif [ "$backend" = "cpu" ]; then
+        if [ -d "$SCRIPT_DIR/venv_gpu" ]; then
+            venv_name="venv_gpu"
+            backend="nvidia"
+        elif [ -d "$SCRIPT_DIR/venv_intel" ]; then
+            venv_name="venv_intel"
+            backend="intel"
+        elif [ -d "$SCRIPT_DIR/venv_amd" ]; then
+            venv_name="venv_amd"
+            backend="amd"
+        else
+            venv_name="venv_std"
+        fi
+    else
+        if [ "$backend" = "nvidia" ]; then
+            venv_name="venv_gpu"
+        elif [ "$backend" = "intel" ]; then
+            venv_name="venv_intel"
+        elif [ "$backend" = "amd" ]; then
+            venv_name="venv_amd"
+        fi
     fi
 
     VENV_DIR="$SCRIPT_DIR/$venv_name"
@@ -91,7 +125,9 @@ setup_env() {
     REQ_FILE="$SCRIPT_DIR/requirements.txt"
     
     # 失敗したときにすぐ止まるようにエラー処理を追加じゃ
-    if [ "$backend" = "nvidia" ]; then
+    if [ "$backend" = "client" ]; then
+        $PIP_CMD install -r "$REQ_FILE" || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
+    elif [ "$backend" = "nvidia" ]; then
         $PIP_CMD install -r "$REQ_FILE" onnxruntime-gpu || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
     elif [ "$backend" = "intel" ]; then
         $PIP_CMD install -r "$REQ_FILE" onnxruntime-openvino || { echo "[ERROR] ライブラリのインストールに失敗しました。"; exit 1; }
@@ -125,8 +161,8 @@ if [ $# -eq 0 ]; then
     echo "   WD14 Tagger Universal - Setup Mode"
     echo "=========================================="
     echo "引数が指定されなかったため、環境構築のみを行います。"
-    # CPUのみ作っておく
-    setup_env "cpu"
+    # CPUのみ作っておく（クライアントフラグ0）
+    setup_env "cpu" "0"
     "$SCRIPT_DIR/venv_std/bin/python" "$PYTHON_SCRIPT" --gen-config
     echo "[INFO] セットアップ完了。GPU環境は --gpu 指定時に構築されます。"
     exit 0
@@ -136,7 +172,7 @@ fi
 while [[ $# -gt 0 ]]; do
     case $1 in
         --server) PY_ARGS+=("--mode" "server"); shift ;;
-        --client) PY_ARGS+=("--mode" "client"); shift ;;
+        --client) PY_ARGS+=("--mode" "client"); IS_CLIENT=1; shift ;;
         --organize) DO_ORGANIZE=1; shift ;;
         --tag) DO_TAG=1; shift ;; 
         --no-report) PY_ARGS+=("--no-report"); shift ;;
@@ -203,7 +239,7 @@ if [ $USE_GPU -eq 1 ]; then
     fi
 fi
 
-setup_env "$BACKEND_MODE"
+setup_env "$BACKEND_MODE" "$IS_CLIENT"
 
 echo "[INFO] Pythonスクリプトを実行 ($BACKEND_MODE)..."
 "$VENV_DIR/bin/python" "$PYTHON_SCRIPT" "${PY_ARGS[@]}"
