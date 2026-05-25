@@ -150,10 +150,12 @@ class ExifToolWrapper:
                     "-common_args",
                     "-charset",
                     "filename=utf8",
+                    "-lang",
+                    "en"  # メッセージを英語に固定し、判定ミスを防ぐ
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # 標準エラー出力を標準出力に混ぜてキャッチする
                 startupinfo=startupinfo,
             )
             self.running = True
@@ -192,7 +194,8 @@ class ExifToolWrapper:
                 if line_str == "{ready}":
                     break
                 output_lines.append(line_str)
-            return "\n".join(output_lines)
+            res = "\n".join(output_lines)
+            return res
         except Exception as e:
             print(f"[Error] ExifTool通信エラー: {e}")
             self.stop()
@@ -200,6 +203,8 @@ class ExifToolWrapper:
 
     def get_tags(self, path):
         res = self.execute(["-XMP:Subject", "-s3", "-sep", ", ", "-fast", path])
+        if "Error" in res or "Warning" in res or "File not found" in res:
+            return []
         return [t.strip() for t in res.split(",")] if res else []
 
     def write_tags(self, path, tags):
@@ -217,7 +222,12 @@ class ExifToolWrapper:
                 path,
             ]
         )
-        return "image files updated" in res
+        if "image files updated" in res:
+            return True
+        else:
+            # なぜ書き込みに失敗したのかを画面に表示する
+            tqdm.write(f"[WARN] タグ書き込み失敗 ({os.path.basename(path)}): {res}")
+            return False
 
 
 et_wrapper = ExifToolWrapper()
@@ -642,7 +652,6 @@ def process_images(args):
     aborted = False
     try:
         for img_path in target_files:
-            tqdm.write(f"[DEBUG] 読込開始: {os.path.basename(img_path)}")
             try:
                 rating, existing_tags, need_inference = None, [], True
                 if not args.no_tag or args.organize:
