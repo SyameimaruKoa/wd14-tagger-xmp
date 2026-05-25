@@ -59,6 +59,14 @@ detect_gpu_vendor() {
     elif [[ "$lspci_out" == *"intel"* ]]; then
         echo "intel"
     elif [[ "$lspci_out" == *"amd"* ]] || [[ "$lspci_out" == *"advanced micro devices"* ]] || [[ "$lspci_out" == *"radeon"* ]]; then
+        # 内蔵GPUアーキテクチャの互換性チェック
+        if command -v rocminfo >/dev/null 2>&1; then
+            local arch=$(rocminfo | grep -o "gfx[0-9a-f]\+" | head -n 1)
+            if [ "$arch" = "gfx90c" ]; then
+                echo "amd_unsupported"
+                return
+            fi
+        fi
         echo "amd"
     else
         echo "none"
@@ -214,7 +222,7 @@ if [ $USE_GPU -eq 1 ]; then
         echo "[INFO] NVIDIA GPU モードを強制使用します。"
         BACKEND_MODE="nvidia"
     elif [ "$FORCE_TYPE" = "amd" ]; then
-        echo "[INFO] AMD GPU モードを強制使用します。"
+        echo "[WARN] AMD GPU モードを強制使用しますが、アーキテクチャ未サポートによるコアダンプの危険性があります。"
         BACKEND_MODE="amd"
     else
         # 自動判別
@@ -228,6 +236,9 @@ if [ $USE_GPU -eq 1 ]; then
         elif [ "$DETECTED" = "amd" ]; then
             echo "[INFO] AMD GPU を検出しました。ROCmモードで実行します。"
             BACKEND_MODE="amd"
+        elif [ "$DETECTED" = "amd_unsupported" ]; then
+            echo "[WARN] サポート外のAMD内蔵GPU(gfx90c等)を検出しました。コアダンプ回避のため、安全なCPUモードで実行します。"
+            BACKEND_MODE="cpu"
         else
             echo "[WARN] GPUが見つからない、または判別できませんでした。CPUモードで実行します。"
             BACKEND_MODE="cpu"
@@ -237,6 +248,11 @@ if [ $USE_GPU -eq 1 ]; then
     if [ "$BACKEND_MODE" != "cpu" ]; then
         PY_ARGS+=("--gpu")
     fi
+fi
+
+# CPUモード時はスレッドプールのデッドロックを防ぐため並列前処理を強制OFFにするのじゃ
+if [ "$BACKEND_MODE" = "cpu" ]; then
+    PY_ARGS+=("--io-workers" "0")
 fi
 
 setup_env "$BACKEND_MODE" "$IS_CLIENT"
