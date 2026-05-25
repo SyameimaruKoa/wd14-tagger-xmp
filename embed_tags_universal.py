@@ -347,8 +347,6 @@ def load_and_preprocess(path):
 
 def organize_file(file_path, rating):
     folder_mapping = APP_CONFIG.get("folder_names", {})
-    # Try direct mapping first. If not found, fall back to base rating
-    # (e.g. map "sensitive_mild"/"sensitive_high" using "sensitive" key)
     folder_name = folder_mapping.get(rating)
     if folder_name is None:
         base = rating.split("_")[0] if isinstance(rating, str) and "_" in rating else rating
@@ -644,6 +642,7 @@ def process_images(args):
     aborted = False
     try:
         for img_path in target_files:
+            tqdm.write(f"[DEBUG] 読込開始: {os.path.basename(img_path)}")
             try:
                 rating, existing_tags, need_inference = None, [], True
                 if not args.no_tag or args.organize:
