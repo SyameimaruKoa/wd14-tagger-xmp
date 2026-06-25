@@ -15,6 +15,7 @@ FORCE_TYPE="auto" # auto, nvidia, intel, amd
 PY_ARGS=()
 DO_ORGANIZE=0
 DO_TAG=0
+DO_PIXIV=0
 IS_CLIENT=0
 
 show_help() {
@@ -32,6 +33,7 @@ show_help() {
     echo "    --force-amd         AMD GPUを強制的に使用する"
     echo "    --organize          フォルダ整理のみ行う（タグ付けOFF）"
     echo "    --tag               タグ付けも行う（--organize併用時）"
+    echo "    --pixiv             Pixiv整理モード（R17以上を親フォルダへ移動）"
     echo "    --no-report         レポート作成なし"
     echo "    --recursive         再帰検索ON"
     echo "    --no-recursive      再帰検索OFF"
@@ -183,6 +185,7 @@ while [[ $# -gt 0 ]]; do
         --client) PY_ARGS+=("--mode" "client"); IS_CLIENT=1; shift ;;
         --organize) DO_ORGANIZE=1; shift ;;
         --tag) DO_TAG=1; shift ;; 
+        --pixiv) PY_ARGS+=("--pixiv"); DO_PIXIV=1; shift ;;
         --no-report) PY_ARGS+=("--no-report"); shift ;;
         --recursive) PY_ARGS+=("--recursive"); shift ;;
         --no-recursive) PY_ARGS+=("--no-recursive"); shift ;;
@@ -205,9 +208,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 # アクションロジック構築
-if [ $DO_ORGANIZE -eq 1 ]; then
-    PY_ARGS+=("--organize")
-    if [ $DO_TAG -eq 0 ]; then
+if [ $DO_ORGANIZE -eq 1 ] || [ $DO_PIXIV -eq 1 ]; then
+    if [[ ! " ${PY_ARGS[*]} " =~ " --organize " ]]; then
+        PY_ARGS+=("--organize")
+    fi
+    if [ $DO_TAG -eq 0 ] && [ $DO_PIXIV -eq 0 ]; then
         PY_ARGS+=("--no-tag")
     fi
 fi

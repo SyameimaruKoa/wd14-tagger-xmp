@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     WD14 Tagger Universal Wrapper (日本語版)
 
@@ -23,6 +23,10 @@
 .PARAMETER Tag
     【タグ付け有効化】 (スイッチ)
     -Organize と併用する際に、「整理もしつつタグ付けもしたい」場合に指定する。
+
+.PARAMETER Pixiv
+    【Pixiv整理モード】 (スイッチ)
+    Pixiv専用の整理を行う。再帰的にタグ付けし、R15.5以下は移動せず、R17以上を親フォルダに階層を維持して移動する。
 
 .PARAMETER NoReport
     【レポートなし】 (スイッチ)
@@ -133,6 +137,7 @@ param (
     [switch]$Client,
     [string]$HostIP,
     [int]$Port,
+    [switch]$Pixiv,
     
     # Old params
     [float]$RatingThresh,
@@ -158,6 +163,7 @@ function Show-Help {
     Write-Host "    -Gpu                  GPUを使用する（Windows: DirectML）"
     Write-Host "    -Organize             フォルダ整理のみ行う（タグ付けOFF）"
     Write-Host "    -Tag                  タグ付けも行う（-Organize併用時）"
+    Write-Host "    -Pixiv                Pixiv整理モード（R17以上を親フォルダへ移動）"
     Write-Host "    -NoReport             レポート作成なし"
     Write-Host "    -Recursive            再帰検索ON"
     Write-Host "    -NoRecursive          再帰検索OFF"
@@ -299,7 +305,10 @@ else { $PyArgs += ("--mode", "standalone") }
 # Organize指定時 -> デフォルトでNo-Tag扱いになる。Tag指定があればタグも有効。
 if ($Organize) {
     $PyArgs += "--organize"
-    if (-not $Tag) { $PyArgs += "--no-tag" }
+    if (-not $Tag -and -not $Pixiv) { $PyArgs += "--no-tag" }
+}
+if ($Pixiv) {
+    $PyArgs += "--pixiv"
 }
 else {
     # 通常モード -> Tag指定は不要(デフォルトON)。No-Tag指定があれば...無いので実装不要

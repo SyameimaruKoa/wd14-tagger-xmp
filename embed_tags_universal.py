@@ -355,24 +355,46 @@ def load_and_preprocess(path):
         return None, e
 
 
-def organize_file(file_path, rating):
+def organize_file(file_path, rating, is_pixiv=False, base_dirs=None):
     folder_mapping = APP_CONFIG.get("folder_names", {})
     folder_name = folder_mapping.get(rating)
     if folder_name is None:
         base = rating.split("_")[0] if isinstance(rating, str) and "_" in rating else rating
         folder_name = folder_mapping.get(base, rating)
+        
+    if is_pixiv:
+        if rating in ["general", "sensitive", "sensitive_mild", "sensitive_high"]:
+            return False, file_path
+            
     try:
         abs_path = os.path.abspath(file_path)
         dir_name, file_name = os.path.dirname(abs_path), os.path.basename(abs_path)
-        target_dir = os.path.join(dir_name, folder_name)
+        
+        target_dir = None
+        if is_pixiv and base_dirs:
+            best_base = None
+            for bp in base_dirs:
+                if abs_path.startswith(bp):
+                    if best_base is None or len(bp) > len(best_base):
+                        best_base = bp
+            if best_base:
+                parent_of_base = os.path.dirname(best_base)
+                rel_path = os.path.relpath(abs_path, best_base)
+                target_path = os.path.join(parent_of_base, folder_name, rel_path)
+                target_dir = os.path.dirname(target_path)
+                
+        if target_dir is None:
+            target_dir = os.path.join(dir_name, folder_name)
+            target_path = os.path.join(target_dir, file_name)
+            
         if os.path.abspath(dir_name) == os.path.abspath(target_dir):
             return False, abs_path
+            
         os.makedirs(target_dir, exist_ok=True)
-        target_path = os.path.join(target_dir, file_name)
         if os.path.exists(target_path):
-            base, ext = os.path.splitext(file_name)
+            base_name, ext = os.path.splitext(file_name)
             target_path = os.path.join(
-                target_dir, f"{base}_{uuid.uuid4().hex[:6]}{ext}"
+                target_dir, f"{base_name}_{uuid.uuid4().hex[:6]}{ext}"
             )
         shutil.move(abs_path, target_path)
         return True, target_path
@@ -524,6 +546,15 @@ def process_images(args):
         tags = load_tags_from_path(tags_path)
     use_recursive = args.recursive if args.recursive is not None else not args.organize
     target_files = collect_images(args.images, recursive=use_recursive)
+    
+    base_dirs = []
+    for p in args.images:
+        base = p.split('*')[0].split('?')[0]
+        abs_base = os.path.abspath(base)
+        if not os.path.isdir(abs_base):
+            abs_base = os.path.dirname(abs_base)
+        base_dirs.append(abs_base)
+
     if not target_files:
         print("[WARN] 対象ファイルが見つかりません。")
         if not args.no_tag:
@@ -572,7 +603,7 @@ def process_images(args):
         else:
             skipped_count += 1
         if args.organize and rating:
-            moved, new_path = organize_file(img_path, rating)
+            moved, new_path = organize_file(img_path, rating, getattr(args, 'pixiv', False), base_dirs)
             if moved:
                 organized_count += 1
                 final_path = new_path
@@ -754,6 +785,11 @@ def main():
         help="レーティングに基づいてフォルダ振り分けを行う",
     )
     action_group.add_argument(
+        "--pixiv",
+        action="store_true",
+        help="Pixiv整理モード（R17以上を親フォルダに移動、R15.5以下は移動しない。再帰・整理を強制）",
+    )
+    action_group.add_argument(
         "--no-report", action="store_true", help="HTMLレポートを作成しない"
     )
     conf_group = parser.add_argument_group("判定・システム設定")
@@ -809,6 +845,9 @@ def main():
     misc_group.add_argument("--gen-config", action="store_true")
     misc_group.add_argument("-h", "--help", action="help", help="ヘルプを表示")
     args = parser.parse_args()
+    if args.pixiv:
+        args.organize = True
+        args.recursive = True
     if IS_WINDOWS:
         os.system("")
     if args.gen_config:
