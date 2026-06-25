@@ -726,6 +726,10 @@ def process_images(args):
                             pending = pending[batch_size:]
                 else:
                     finalize_result(img_path, existing_tags, [], rating, None)
+            except urllib.error.HTTPError as e:
+                tqdm.write(f"サーバー処理エラー {os.path.basename(img_path)}: {e}")
+                pbar.update(1)
+                continue
             except (urllib.error.URLError, socket.timeout) as e:
                 tqdm.write(f"接続エラー(タイムアウト含む): {e}")
                 aborted = True
