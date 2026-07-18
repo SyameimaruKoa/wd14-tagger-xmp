@@ -1,6 +1,9 @@
 # WD14 Tagger Universal
 
+<a href="https://colab.research.google.com/github/SyameimaruKoa/wd14-tagger-xmp/blob/main/run_colab_server.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
 このツールは、AI (WD14 Tagger) を使用して画像認識を行い、タグ付け・フォルダ整理・レポート作成を行うツールじゃ。
+
 
 Windows (PowerShell) と Linux (Bash) の両方に対応しておる。
 
@@ -104,6 +107,36 @@ GPUを使う場合は `-Gpu` をつける（推奨）。
 .\run_tagger.ps1 -Client -HostIP "192.168.1.10" -Path "C:\Images" -Organize
 
 ```
+
+### 6. Google Colab サーバーモードでの実行
+
+ローカルのPCスペックが不足している場合や、GPUを使用したい場合は、Google Colaboratory (GPU環境) で推論サーバーを起動し、ローカルから接続してタグ付けを行うことができるぞ。
+
+<a href="https://colab.research.google.com/github/SyameimaruKoa/wd14-tagger-xmp/blob/main/run_colab_server.ipynb" target="_parent"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
+#### 接続手順
+
+1. **Tailscale の準備**:
+   - Tailscale の管理画面の [Settings > Keys](https://login.tailscale.com/admin/settings/keys) から **Ephemeral（一時的）** かつ **Reusable（再利用可能）** な認証キーを作成するのじゃ。
+   - その際、タグとして **`tag:Guest`** を割り当てるのじゃ（事前に Tailscale の ACL 設定で `tag:Guest` を登録しておく必要があるぞ）。
+   - ※**Ephemeral** に設定しておくことで、Google Colab のインスタンスがシャットダウンしてオフラインになった際、ノードリストから自動的に切断・削除されるようになるぞ。
+2. **Colab Secrets (シークレット) の登録 (任意)**:
+   - Google Colab の左メニューにある鍵マーク（Secrets）を開き、名前 `TAILSCALE_AUTHKEY`、値にコピーした認証キーを登録し、ノートブックへのアクセス権をONにするのじゃ。
+   - ※登録していない（または登録したくない）場合、セル実行時にキー（またはデバイス追加用コマンド）の入力を求めるプロンプトが表示されるので、そこで貼り付ければよいぞ。
+3. **サーバーの起動**:
+   - 上記の「Open In Colab」バッジからノートブックを開き、上から順番にセルを実行するのじゃ。
+   - シークレットが未登録の場合は、Tailscale 管理画面で表示されたキー（または「Add device」から取得できる `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up --auth-key=tskey-auth-...` のようなコマンド全体）をプロンプトに入力（貼り付け）するのじゃ。入力された文字列から認証トークンが自動抽出されて接続されるぞ。
+   - 正常に起動すると、Tailscale の IP アドレスと、ローカル側で実行するためのコマンドの例が表示されるぞ。
+4. **ローカルからの接続実行**:
+   - Tailscale の MagicDNS を利用するため、ホスト名に **`wd14-tagger-colab`** を指定してクライアントモードを実行するのじゃ。これにより、毎回変わる IP アドレスを入力する手間を省けるぞ！
+     ```
+     .\run_tagger.ps1 -Client -HostIP "wd14-tagger-colab" -Path "C:\Images" -Organize
+     ```
+   - ※MagicDNS名 `wd14-tagger-colab` は、あらかじめ設定ファイル `config.json` の接続先リスト（`server_hosts`）にも追加されているため、単に `-HostIP` を省略して実行し、接続先選択メニューから選ぶこともできるぞ。
+     ```
+     .\run_tagger.ps1 -Client -Path "C:\Images" -Organize
+     ```
+
 
 ## オプション一覧
 

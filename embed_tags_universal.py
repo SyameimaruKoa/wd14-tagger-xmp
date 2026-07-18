@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
     "model_repo": "SmilingWolf/wd-swinv2-tagger-v3",
     "model_file": "model.onnx",
     "tags_file": "selected_tags.csv",
-    "server_hosts": ["localhost", "100,xxx,xxx,xxx"],
+    "server_hosts": ["localhost", "wd14-tagger-colab", "100.xxx.xxx.xxx"],
     "server_port": 5000,
     "client_timeout": 15,
     "sensitive_split_threshold": 0.50,
