@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     WD14 Tagger Universal Wrapper (日本語版)
 

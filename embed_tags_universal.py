@@ -24,6 +24,30 @@ SYSTEM_OS, IS_WINDOWS, IS_LINUX = (
     platform.system() == "Windows",
     platform.system() == "Linux",
 )
+
+if IS_WINDOWS:
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    if hasattr(sys.stderr, "reconfigure"):
+        try:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def safe_write(msg, end="\n"):
+    try:
+        tqdm.write(msg, end=end)
+    except Exception:
+        try:
+            sys.stdout.write((msg + end).encode("utf-8", errors="replace").decode(sys.stdout.encoding or "ascii", errors="replace"))
+            sys.stdout.flush()
+        except Exception:
+            pass
+
 EXIFTOOL_CMD = "exiftool"
 VALID_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".bmp", ".avif")
 RATING_TAGS = [
@@ -129,14 +153,33 @@ REPORT_DATA = []
 COMPARE_DATA = []
 
 
+def resolve_exiftool_cmd(cmd):
+    resolved = shutil.which(cmd) if not os.path.isabs(cmd) else cmd
+    if resolved:
+        shim_file = os.path.splitext(resolved)[0] + ".shim"
+        if os.path.exists(shim_file):
+            try:
+                with open(shim_file, "r", encoding="utf-8-sig") as f:
+                    target = f.read().strip("\ufeff\r\n\t ")
+                if target and os.path.exists(target):
+                    return target
+            except Exception:
+                pass
+        return resolved
+    return cmd
+
+
 class ExifToolWrapper:
     def __init__(self, cmd=EXIFTOOL_CMD):
-        self.cmd, self.process, self.running = cmd, None, False
+        self.raw_cmd = cmd
+        self.cmd = resolve_exiftool_cmd(cmd)
+        self.process, self.running = None, False
 
     def start(self):
         if self.running:
             return
         try:
+            self.cmd = resolve_exiftool_cmd(self.raw_cmd)
             startupinfo = subprocess.STARTUPINFO() if IS_WINDOWS else None
             if IS_WINDOWS:
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -167,13 +210,33 @@ class ExifToolWrapper:
         if not self.running:
             return
         try:
-            self.process.stdin.write(b"-stay_open\nFalse\n")
-            self.process.stdin.flush()
-            self.process.wait(timeout=2)
-        except Exception:
             if self.process:
-                self.process.kill()
-        self.running = False
+                if self.process.stdin:
+                    try:
+                        if not self.process.stdin.closed:
+                            self.process.stdin.write(b"-stay_open\nFalse\n")
+                            self.process.stdin.flush()
+                    except Exception:
+                        pass
+                    try:
+                        self.process.stdin.close()
+                    except Exception:
+                        pass
+                try:
+                    self.process.wait(timeout=2)
+                except Exception:
+                    try:
+                        self.process.kill()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            self.running = False
+            self.process = None
+
+    def __del__(self):
+        self.stop()
 
     def execute(self, args):
         if not self.running:
@@ -226,7 +289,7 @@ class ExifToolWrapper:
             return True
         else:
             # なぜ書き込みに失敗したのかを画面に表示する
-            tqdm.write(f"[WARN] タグ書き込み失敗 ({os.path.basename(path)}): {res}")
+            safe_write(f"[WARN] タグ書き込み失敗 ({os.path.basename(path)}): {res}")
             return False
 
 
@@ -450,7 +513,7 @@ def calculate_rating(
             get_bar(rating_probs[2], Colors.MAGENTA),
             get_bar(rating_probs[3], Colors.RED),
         )
-        tqdm.write(
+        safe_write(
             f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} Sen:{b_sen}{fmt_prob(rating_probs[1])} Que:{b_que}{fmt_prob(rating_probs[2])} Exp:{b_exp}{fmt_prob(rating_probs[3])}",
             end="",
         )
