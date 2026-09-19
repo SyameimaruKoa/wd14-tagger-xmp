@@ -1,9 +1,9 @@
 ﻿<#
 .SYNOPSIS
-    WD14 Tagger Universal Wrapper (日本語版)
+    DBV4 Tagger Universal Wrapper (日本語版)
 
 .DESCRIPTION
-    画像認識AI (WD14 Tagger) を使用して画像のタグ付けや整理を行うスクリプトじゃ。
+    DBV4モデルを使用して画像のタグ付けや整理を行うスクリプトじゃ。
     引数なしで実行すると「環境構築モード」として動作し、セットアップのみを行って終了する。
     事故防止のため、処理を行いたい場合は必ず -Path などを指定するのじゃ。
 
@@ -55,6 +55,10 @@
 .PARAMETER IoWorkers
     【前処理ワーカー数】 (数値)
     画像の読み込み・前処理を並列化するワーカー数（デフォルト: 自動）。
+
+.PARAMETER ModelProfile
+    【DBV4モデルプロファイル】 (文字列)
+    lightweight / balanced / high / large / ultra から選択する。
 
 .PARAMETER ModelRepo
     【モデルリポジトリ】 (文字列)
@@ -144,10 +148,11 @@ param (
     [switch]$NoReport,
     [switch]$Recursive,
     [switch]$NoRecursive,
-    [float]$Thresh = 0.35,
+    [Nullable[float]]$Thresh,
     [switch]$Gpu,
     [int]$BatchSize,
     [int]$IoWorkers,
+    [string]$ModelProfile,
     [string]$ModelRepo,
     [string]$ModelFile,
     [string]$TagsFile,
@@ -176,7 +181,7 @@ param (
 
 #region Help Function
 function Show-Help {
-    Write-Host "WD14 Tagger Universal (日本語ヘルプ)" -ForegroundColor Cyan
+    Write-Host "DBV4 Tagger Universal (日本語ヘルプ)" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "使い方: .\run_tagger.ps1 [オプション] [パス]" -ForegroundColor Yellow
     Write-Host ""
@@ -191,10 +196,11 @@ function Show-Help {
     Write-Host "    -NoReport             レポート作成なし"
     Write-Host "    -Recursive            再帰検索ON"
     Write-Host "    -NoRecursive          再帰検索OFF"
-    Write-Host "    -Thresh <0.0-1.0>     タグ採用確率の閾値（デフォルト: 0.35）"
+    Write-Host "    -Thresh <0.0-1.0>     DBV4のtag best_thresholdを一括上書き（省略時はタグ固有値）"
     Write-Host "    -BatchSize <n>        推論バッチサイズ"
     Write-Host "    -IoWorkers <n>        前処理の並列ワーカー数"
-    Write-Host "    -ModelRepo <repo>     モデル/タグのHFリポジトリID"
+    Write-Host "    -ModelProfile <name>  DBV4モデルプロファイル (lightweight/balanced/high/large/ultra)"
+    Write-Host "    -ModelRepo <repo>     DBV4モデル/タグのHFリポジトリIDを明示指定"
     Write-Host "    -ModelFile <file>     モデルファイル名またはパス"
     Write-Host "    -TagsFile <file>      タグCSVファイル名またはパス"
     Write-Host "    -Force                既存タグがあっても強制的に再解析・上書き"
@@ -337,7 +343,7 @@ function Prepare-Environment {
 # 引数が一つもない場合はセットアップモード
 if ($PSBoundParameters.Count -eq 0 -and (-not $RemainingArgs)) {
     Write-Host "==========================================" -ForegroundColor Cyan
-    Write-Host "   WD14 Tagger Universal - Setup Mode" -ForegroundColor Cyan
+    Write-Host "   DBV4 Tagger Universal - Setup Mode" -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "引数が指定されなかったため、環境構築のみを行いました。"
     Write-Host "画像処理を行うには -Path オプションなどを指定してください。"
@@ -382,10 +388,11 @@ if ($Recursive) { $PyArgs += "--recursive" }
 if ($NoRecursive) { $PyArgs += "--no-recursive" }
 
 # その他パラメータ
-if ($Thresh -ne 0.35) { $PyArgs += ("--thresh", $Thresh) }
+if ($PSBoundParameters.ContainsKey("Thresh")) { $PyArgs += ("--thresh", $Thresh) }
 if ($Gpu) { $PyArgs += "--gpu" }
 if ($PSBoundParameters.ContainsKey('BatchSize')) { $PyArgs += ("--batch-size", $BatchSize) }
 if ($PSBoundParameters.ContainsKey('IoWorkers')) { $PyArgs += ("--io-workers", $IoWorkers) }
+if ($PSBoundParameters.ContainsKey('ModelProfile')) { $PyArgs += ("--model-profile", $ModelProfile) }
 if ($PSBoundParameters.ContainsKey('ModelRepo')) { $PyArgs += ("--model-repo", $ModelRepo) }
 if ($PSBoundParameters.ContainsKey('ModelFile')) { $PyArgs += ("--model-file", $ModelFile) }
 if ($PSBoundParameters.ContainsKey('TagsFile')) { $PyArgs += ("--tags-file", $TagsFile) }

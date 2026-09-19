@@ -1,116 +1,87 @@
-import argparse, csv, os, sys, subprocess, glob, uuid, shutil, platform, json, io, socket, warnings, urllib.request, urllib.error, time, re
+import argparse
+import csv
+import glob
+import io
+import json
+import os
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+import warnings
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
 import numpy as np
 import onnxruntime as ort
 from PIL import Image
+from huggingface_hub import hf_hub_download
 
 try:
-    import pillow_avif
+    import pillow_avif  # noqa: F401
 except ImportError:
-    pass
-from huggingface_hub import hf_hub_download
-from http.server import BaseHTTPRequestHandler, HTTPServer
+    pillow_avif = None
 
 try:
     import make_report
 except ImportError:
     make_report = None
+
 try:
     from tqdm import tqdm
 except ImportError:
-    tqdm = lambda x, **kwargs: x
-warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
-SYSTEM_OS, IS_WINDOWS, IS_LINUX = (
-    platform.system(),
-    platform.system() == "Windows",
-    platform.system() == "Linux",
+    tqdm = lambda iterable, **kwargs: iterable
+
+from dbv4 import (
+    DBV4Metadata,
+    DBV4Preprocessor,
+    DBV4_RATING_NAMES,
+    MODEL_PROFILES,
+    adapt_input_layout,
+    get_model_profile,
+    infer_output_to_probabilities,
 )
 
-if IS_WINDOWS:
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-    if hasattr(sys.stderr, "reconfigure"):
-        try:
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+warnings.filterwarnings("ignore", category=UserWarning, module="huggingface_hub.*")
 
-
-def safe_write(msg, end="\n"):
-    try:
-        tqdm.write(msg, end=end)
-    except Exception:
-        try:
-            sys.stdout.write(
-                (msg + end)
-                .encode("utf-8", errors="replace")
-                .decode(sys.stdout.encoding or "ascii", errors="replace")
-            )
-            sys.stdout.flush()
-        except Exception:
-            pass
-
-
-EXIFTOOL_CMD = "exiftool"
+SYSTEM_OS = platform.system()
+IS_WINDOWS = SYSTEM_OS == "Windows"
+IS_LINUX = SYSTEM_OS == "Linux"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
 VALID_EXTS = (".webp", ".jpg", ".jpeg", ".png", ".bmp", ".avif")
-RATING_TAGS = [
+
+RATING_TAGS = {
     "general",
     "sensitive",
     "questionable",
     "explicit",
-    "sensitive_0",
-    "sensitive_1",
-    "sensitive_2",
-    "sensitive_3",
-    "sensitive_4",
-    "sensitive_5",
-    "sensitive_6",
-    "sensitive_7",
-    "sensitive_8",
-    "sensitive_9",
-    "questionable_0",
-    "questionable_1",
-    "questionable_2",
-    "questionable_3",
-    "questionable_4",
-    "questionable_5",
-    "questionable_6",
-    "questionable_7",
-    "questionable_8",
-    "questionable_9",
+    *(f"sensitive_{i}" for i in range(10)),
+    *(f"questionable_{i}" for i in range(10)),
     "sensitive_mild",
     "sensitive_high",
-    "sensitive_lvl1",
-    "sensitive_lvl2",
-    "sensitive_lvl3",
-    "sensitive_lvl4",
-    "sensitive_lvl5",
-    "sensitive_lvl6",
-]
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
-REPORT_LOG_FILE = os.path.join(os.getcwd(), "report_log.json")
-COMPARE_REPORT_JSON = os.path.join(os.getcwd(), "compare_report.json")
-COMPARE_REPORT_CSV = os.path.join(os.getcwd(), "compare_report.csv")
-DEFAULT_CONFIG = {
-    "model_repo": "SmilingWolf/wd-swinv2-tagger-v3",
-    "model_file": "model.onnx",
-    "tags_file": "selected_tags.csv",
+    *(f"sensitive_lvl{i}" for i in range(1, 7)),
+}
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "model_profile": "balanced",
+    "model_profiles": MODEL_PROFILES,
     "server_hosts": ["localhost", "google-colab", "100.xxx.xxx.xxx"],
     "server_port": 5000,
     "client_timeout": 15,
     "openvino_gpu_device": "GPU.0",
-    "rating_sublevel_thresholds_5way": [
-        0.20,
-        0.40,
-        0.60,
-        0.80,
-    ],    "rating_severity_sensitive_upper_reference": 25.0,
-    "rating_severity_questionable_upper_reference": 40.0,
     "general_threshold": 0.40,
+    "rating_sublevel_thresholds_5way": [0.20, 0.40, 0.60, 0.80],
+    "rating_severity_sensitive_upper_reference": 25.0,
+    "rating_severity_questionable_upper_reference": 40.0,
     "record_rating_percentages": True,
     "record_raw_score": True,
     "raw_score_format": "{rating}_score:{raw_score:.4f}",
@@ -131,111 +102,93 @@ DEFAULT_CONFIG = {
     },
 }
 
-
-def merge_defaults(target, source):
-    has_change = False
-    for k, v in source.items():
-        if k not in target:
-            target[k], has_change = v, True
-        elif isinstance(v, dict) and isinstance(target.get(k), dict):
-            if merge_defaults(target[k], v):
-                has_change = True
-    return has_change
+APP_CONFIG: Dict[str, Any] = {}
 
 
-def load_config():
-    config = DEFAULT_CONFIG.copy()
+class Colors:
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    MAGENTA = "\033[35m"
+    RED = "\033[31m"
+    GREY = "\033[90m"
+    CYAN = "\033[36m"
+    RESET = "\033[0m"
+
+
+def safe_write(message: str, end: str = "\n") -> None:
+    try:
+        tqdm.write(message, end=end)
+    except Exception:
+        try:
+            sys.stdout.write(message + end)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+def merge_defaults(target: Dict[str, Any], source: Dict[str, Any]) -> bool:
+    changed = False
+    for key, value in source.items():
+        if key not in target:
+            target[key] = json.loads(json.dumps(value))
+            changed = True
+        elif isinstance(value, dict) and isinstance(target.get(key), dict):
+            changed = merge_defaults(target[key], value) or changed
+    return changed
+
+
+def load_config() -> Dict[str, Any]:
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
     if not os.path.exists(CONFIG_FILE):
-        print(f"[INFO] コンフィグファイルを生成しました: {CONFIG_FILE}")
-        try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        print(f"[INFO] DBV4用コンフィグを生成しました: {CONFIG_FILE}")
+        return config
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            user_config = json.load(f)
+        if not isinstance(user_config, dict):
+            raise ValueError("config.json のルートがオブジェクトではありません")
+        if merge_defaults(user_config, DEFAULT_CONFIG):
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(DEFAULT_CONFIG, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            print(f"[WARN] コンフィグファイルの作成に失敗しました: {e}")
-    else:
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                user_config = json.load(f)
-            if merge_defaults(user_config, DEFAULT_CONFIG):
-                print(
-                    f"[INFO] コンフィグファイルを更新しました（不足項目を追加）: {CONFIG_FILE}"
-                )
-                try:
-                    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                        json.dump(user_config, f, indent=4, ensure_ascii=False)
-                except Exception as e:
-                    print(f"[WARN] コンフィグファイルの更新保存に失敗しました: {e}")
-            config, print_str = (
-                user_config,
-                f"[INFO] コンフィグを読み込みました: {CONFIG_FILE}",
-            )
-            print(print_str)
-        except Exception as e:
-            print(
-                f"[WARN] コンフィグの読み込みに失敗しました: {e}. デフォルト値を使用します。"
-            )
-    return config
+                json.dump(user_config, f, indent=4, ensure_ascii=False)
+            print(f"[INFO] DBV4設定を追記しました: {CONFIG_FILE}")
+        return user_config
+    except Exception as exc:
+        print(f"[WARN] config.jsonを読み込めないためデフォルト設定を使用します: {exc}")
+        return config
 
 
 APP_CONFIG = load_config()
 
 
-class Colors:
-    GREEN, YELLOW, MAGENTA, RED, GREY, CYAN, RESET = (
-        "\033[32m",
-        "\033[33m",
-        "\033[35m",
-        "\033[31m",
-        "\033[90m",
-        "\033[36m",
-        "\033[0m",
-    )
+def get_bar(probability: float, color: str, width: int = 5) -> str:
+    filled = max(0, min(width, int(probability * width)))
+    return f"{color}{'█' * filled}{Colors.GREY}{'░' * (width - filled)}{Colors.RESET}"
 
 
-def get_bar(prob, color, width=5):
-    fill_len = int(prob * width)
-    return (
-        f"{color}{'█' * fill_len}{Colors.GREY}{'░' * (width - fill_len)}{Colors.RESET}"
-    )
-
-
-REPORT_DATA = []
-COMPARE_DATA = []
-
-
-def resolve_exiftool_cmd(cmd):
-    resolved = shutil.which(cmd) if not os.path.isabs(cmd) else cmd
-    if resolved:
-        shim_file = os.path.splitext(resolved)[0] + ".shim"
-        if os.path.exists(shim_file):
-            try:
-                with open(shim_file, "r", encoding="utf-8-sig") as f:
-                    target = f.read().strip("\ufeff\r\n\t ")
-                if target and os.path.exists(target):
-                    return target
-            except Exception:
-                pass
-        return resolved
-    return cmd
+def resolve_exiftool_cmd(command: str) -> str:
+    resolved = shutil.which(command) if not os.path.isabs(command) else command
+    return resolved or command
 
 
 class ExifToolWrapper:
-    def __init__(self, cmd=EXIFTOOL_CMD):
-        self.raw_cmd = cmd
-        self.cmd = resolve_exiftool_cmd(cmd)
-        self.process, self.running = None, False
+    def __init__(self, command: str = "exiftool") -> None:
+        self.raw_command = command
+        self.command = resolve_exiftool_cmd(command)
+        self.process = None
+        self.running = False
 
-    def start(self):
+    def start(self) -> None:
         if self.running:
             return
         try:
-            self.cmd = resolve_exiftool_cmd(self.raw_cmd)
             startupinfo = subprocess.STARTUPINFO() if IS_WINDOWS else None
             if IS_WINDOWS:
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             self.process = subprocess.Popen(
                 [
-                    self.cmd,
+                    self.command,
                     "-stay_open",
                     "True",
                     "-@",
@@ -244,1243 +197,899 @@ class ExifToolWrapper:
                     "-charset",
                     "filename=utf8",
                     "-lang",
-                    "en",  # メッセージを英語に固定し、判定ミスを防ぐ
+                    "en",
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # 標準エラー出力を標準出力に混ぜてキャッチする
+                stderr=subprocess.STDOUT,
                 startupinfo=startupinfo,
             )
             self.running = True
-        except Exception as e:
-            print(f"[ERROR] ExifToolの起動に失敗しました: {e}")
-            self.running = False
+        except Exception as exc:
+            print(f"[ERROR] ExifToolの起動に失敗しました: {exc}")
 
-    def stop(self):
+    def stop(self) -> None:
         if not self.running:
             return
         try:
+            if self.process and self.process.stdin:
+                self.process.stdin.write(b"-stay_open\nFalse\n")
+                self.process.stdin.flush()
+                self.process.stdin.close()
             if self.process:
-                if self.process.stdin:
-                    try:
-                        if not self.process.stdin.closed:
-                            self.process.stdin.write(b"-stay_open\nFalse\n")
-                            self.process.stdin.flush()
-                    except Exception:
-                        pass
-                    try:
-                        self.process.stdin.close()
-                    except Exception:
-                        pass
                 try:
                     self.process.wait(timeout=2)
                 except Exception:
-                    try:
-                        self.process.kill()
-                    except Exception:
-                        pass
+                    self.process.kill()
         except Exception:
             pass
         finally:
-            self.running = False
             self.process = None
+            self.running = False
 
-    def __del__(self):
-        self.stop()
-
-    def execute(self, args):
+    def execute(self, arguments: Sequence[str]) -> str:
         if not self.running:
             self.start()
-            if not self.running:
-                return ""
+        if not self.running or not self.process or not self.process.stdin or not self.process.stdout:
+            return ""
         try:
-            for arg in args:
-                self.process.stdin.write(arg.encode("utf-8") + b"\n")
+            for argument in arguments:
+                self.process.stdin.write(str(argument).encode("utf-8") + b"\n")
             self.process.stdin.write(b"-execute\n")
             self.process.stdin.flush()
-            output_lines = []
+            output = []
             while True:
                 line = self.process.stdout.readline()
                 if not line:
                     break
-                line_str = line.decode("utf-8", errors="ignore").strip()
-                if line_str == "{ready}":
+                text = line.decode("utf-8", errors="ignore").strip()
+                if text == "{ready}":
                     break
-                output_lines.append(line_str)
-            res = "\n".join(output_lines)
-            return res
-        except Exception as e:
-            print(f"[Error] ExifTool通信エラー: {e}")
+                output.append(text)
+            return "\n".join(output)
+        except Exception as exc:
+            safe_write(f"[ERROR] ExifTool通信エラー: {exc}")
             self.stop()
             return ""
 
-    def get_tags(self, path):
-        res = self.execute(["-XMP:Subject", "-s3", "-sep", ", ", "-fast", path])
-        if "Error" in res or "Warning" in res or "File not found" in res:
+    def get_tags(self, path: str) -> List[str]:
+        output = self.execute(["-XMP:Subject", "-s3", "-sep", ", ", "-fast", path])
+        if not output or any(token in output for token in ("Error", "Warning", "File not found")):
             return []
-        return [t.strip() for t in res.split(",")] if res else []
+        return [tag.strip() for tag in output.split(",") if tag.strip()]
 
-    def write_tags(self, path, tags):
+    def write_tags(self, path: str, tags: Sequence[str]) -> bool:
         if not tags:
             return False
-        tags_str = ", ".join(tags)
-        res = self.execute(
+        output = self.execute(
             [
                 "-overwrite_original",
                 "-P",
                 "-m",
                 "-sep",
                 ", ",
-                f"-XMP:Subject={tags_str}",
+                f"-XMP:Subject={', '.join(tags)}",
                 path,
             ]
         )
-        if "image files updated" in res:
+        if "image files updated" in output:
             return True
-        else:
-            # なぜ書き込みに失敗したのかを画面に表示する
-            safe_write(f"[WARN] タグ書き込み失敗 ({os.path.basename(path)}): {res}")
-            return False
+        safe_write(f"[WARN] タグ書き込み失敗 ({os.path.basename(path)}): {output}")
+        return False
+
+    def __del__(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            pass
 
 
 et_wrapper = ExifToolWrapper()
 
 
-def get_batch_limit(session):
-    try:
-        shape = session.get_inputs()[0].shape
-    except Exception:
-        return None
-    if not shape:
-        return None
-    batch_dim = shape[0]
-    if isinstance(batch_dim, (int, np.integer)):
-        return int(batch_dim)
-    return None
-
-
-def resolve_local_path(filename):
-    if not filename:
-        return None
-    candidates = []
-    if os.path.isabs(filename):
-        candidates.append(filename)
-    else:
-        candidates.append(os.path.join(os.getcwd(), filename))
-        candidates.append(os.path.join(SCRIPT_DIR, filename))
-    for candidate in candidates:
-        if os.path.exists(candidate):
-            return os.path.abspath(candidate)
-    return None
-
-
-def resolve_hf_or_local(repo_id, filename, label):
-    local_path = resolve_local_path(filename)
-    if local_path:
-        return local_path
-    if os.path.isabs(filename or ""):
-        raise FileNotFoundError(f"{label}が見つかりません: {filename}")
-    if not repo_id:
-        raise ValueError(f"{label}の取得先リポジトリIDが未指定です。")
-    return hf_hub_download(repo_id=repo_id, filename=filename)
-
-
-def load_tags_from_path(tags_path):
-    with open(tags_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        next(reader)
-        return [row[1] for row in reader]
-
-
-def load_model_and_tags(
-    use_gpu=False, model_repo=None, model_file=None, tags_file=None
-):
-    global MODEL_BATCH_LIMIT
-    repo_id = model_repo or DEFAULT_CONFIG.get("model_repo")
-    model_file = model_file or DEFAULT_CONFIG.get("model_file")
-    tags_file = tags_file or DEFAULT_CONFIG.get("tags_file")
-    try:
-        model_path = resolve_hf_or_local(repo_id, model_file, "モデル")
-        tags_path = resolve_hf_or_local(repo_id, tags_file, "タグCSV")
-    except Exception as e:
-        print(f"[ERROR] モデル/タグの読み込みに失敗しました: {e}")
-        sys.exit(1)
-    tags = load_tags_from_path(tags_path)
-    providers = []
-    if use_gpu:
-        available_providers = ort.get_available_providers()
-        desired_providers = []
-        if IS_WINDOWS:
-            desired_providers.extend(
-                [
-                    "DmlExecutionProvider",
-                    "TensorrtExecutionProvider",
-                    "CUDAExecutionProvider",
-                ]
-            )
-        elif IS_LINUX:
-            openvino_gpu_device = APP_CONFIG.get("openvino_gpu_device", "GPU.0")
-            desired_providers.extend(
-                [
-                    ("OpenVINOExecutionProvider", {"device_type": openvino_gpu_device}),
-                    "TensorrtExecutionProvider",
-                    "CUDAExecutionProvider",
-                    "ROCMExecutionProvider",
-                    "MIGraphXExecutionProvider",
-                ]
-            )
-        for p in desired_providers:
-            p_name = p[0] if isinstance(p, tuple) else p
-            if p_name in available_providers:
-                providers.append(p)
-        if not providers:
-            print(
-                f"[WARN] --gpu が指定されましたが、利用可能な GPU プロバイダ (CUDA / TensorRT 等) が見つかりませんでした。"
-            )
-            if platform.machine() in ["aarch64", "arm64"]:
-                print(
-                    f"[INFO] ARM64 (Tegra / Switch) では PyPI に公式の CUDA 対応 onnxruntime-gpu wheel が提供されていないため、CPU (ARM NEON) で実行します。"
-                )
-    providers.append("CPUExecutionProvider")
-    sess_options = ort.SessionOptions()
-    sess_options.log_severity_level = 3
-    print(f"[INFO] 試行プロバイダ: {providers}")
-
-
-    openvino_requested_device = None
-    if use_gpu and IS_LINUX and any(
-        (p[0] if isinstance(p, tuple) else p) == "OpenVINOExecutionProvider"
-        for p in providers
-    ):
-        for p in providers:
-            if isinstance(p, tuple) and p[0] == "OpenVINOExecutionProvider":
-                openvino_requested_device = p[1].get("device_type", "GPU")
-                break
-        print(f"[INFO] OpenVINO要求デバイス: {openvino_requested_device}")
-    try:
-        sess = ort.InferenceSession(
-            model_path, sess_options=sess_options, providers=providers
-        )
-        active_p = sess.get_providers()
-        print(f"[INFO] アクティブプロバイダ: {active_p}")
-        compiling_providers = {
-            "TensorrtExecutionProvider",
-            "OpenVINOExecutionProvider",
-            "MIGraphXExecutionProvider",
+def build_providers(use_gpu: bool) -> List[Any]:
+    if not use_gpu:
+        return ["CPUExecutionProvider"]
+    available = ort.get_available_providers()
+    candidates: List[Any] = []
+    if IS_WINDOWS:
+        candidates = [
             "DmlExecutionProvider",
-        }
-        active_compiling = [
-            p
-            for p in active_p
-            if (p[0] if isinstance(p, tuple) else p) in compiling_providers
+            "TensorrtExecutionProvider",
+            "CUDAExecutionProvider",
         ]
-        if active_compiling:
-            comp_str = ", ".join(active_compiling)
-            print(f"[INFO] 注意: コンパイルを伴うプロバイダ ({comp_str}) が有効です。")
-            print(
-                f"[INFO]        初回推論（モデル構築）時にはエンジンのコンパイルが発生するため、最初の処理に時間がかかる場合があります。"
-            )
-        if "OpenVINOExecutionProvider" in active_p:
-            print("[INFO] OpenVINO Execution Provider がアクティブです。")
-            if use_gpu and openvino_requested_device:
-                print(f"[INFO] OpenVINO要求デバイス: {openvino_requested_device}")
-        elif use_gpu:
-            raise RuntimeError(
-                "OpenVINOExecutionProviderがアクティブになっていないため、GPU推論を開始できません。"
-            )
-    except Exception as e:
-        if use_gpu:
-            raise RuntimeError(f"GPUプロバイダの初期化に失敗しました: {e}") from e
-        print(
-            f"[WARN] GPUプロバイダのロードに失敗しました: {e}\n[INFO] CPUモードに切り替えます。"
-        )
-        sess = ort.InferenceSession(
-            model_path, sess_options=sess_options, providers=["CPUExecutionProvider"]
-        )
-    MODEL_BATCH_LIMIT = get_batch_limit(sess)
-
-    return sess, tags, sess.get_inputs()[0].name, sess.get_outputs()[0].name
+    elif IS_LINUX:
+        candidates = [
+            ("OpenVINOExecutionProvider", {"device_type": APP_CONFIG.get("openvino_gpu_device", "GPU.0")}),
+            "TensorrtExecutionProvider",
+            "CUDAExecutionProvider",
+            "ROCMExecutionProvider",
+            "MIGraphXExecutionProvider",
+        ]
+    providers: List[Any] = []
+    for candidate in candidates:
+        name = candidate[0] if isinstance(candidate, tuple) else candidate
+        if name in available:
+            providers.append(candidate)
+    providers.append("CPUExecutionProvider")
+    return providers
 
 
-sess_global, tags_global, input_name_cache, label_name_cache = None, None, None, None
-MODEL_BATCH_LIMIT = None
+class RuntimeModel:
+    def __init__(
+        self,
+        metadata: DBV4Metadata,
+        preprocessor: DBV4Preprocessor,
+        session: ort.InferenceSession,
+    ) -> None:
+        self.metadata = metadata
+        self.preprocessor = preprocessor
+        self.session = session
+        input_meta = session.get_inputs()[0]
+        self.input_name = input_meta.name
+        self.input_shape = input_meta.shape
+        self.output_name = session.get_outputs()[0].name
+
+    @property
+    def batch_limit(self) -> Optional[int]:
+        if not self.input_shape:
+            return None
+        value = self.input_shape[0]
+        return int(value) if isinstance(value, (int, np.integer)) else None
+
+    def preprocess_batch(self, images: Sequence[Image.Image]) -> np.ndarray:
+        batch = np.stack([self.preprocessor(image) for image in images], axis=0).astype(np.float32)
+        return adapt_input_layout(batch, self.input_shape)
+
+    def predict_images(self, images: Sequence[Image.Image]) -> List[np.ndarray]:
+        if not images:
+            return []
+        raw = self.session.run(
+            [self.output_name],
+            {self.input_name: self.preprocess_batch(images)},
+        )[0]
+        raw = np.asarray(raw)
+        if raw.ndim == 1:
+            raw = raw[None, :]
+        return [infer_output_to_probabilities(row) for row in raw]
 
 
-def init_global_model(use_gpu, model_repo, model_file, tags_file):
-    global sess_global, tags_global, input_name_cache, label_name_cache
-    if sess_global is None:
-        sess_global, tags_global, input_name_cache, label_name_cache = (
-            load_model_and_tags(use_gpu, model_repo, model_file, tags_file)
-        )
-
-
-def preprocess(image, size=448):
-    image = image.convert("RGB").resize((size, size), Image.BICUBIC)
-    img_np = np.array(image).astype(np.float32)[:, :, ::-1]
-    return np.expand_dims(img_np, 0)
-
-
-def load_and_preprocess(path):
-    try:
-        with Image.open(path) as img:
-            return preprocess(img), None
-    except Exception as e:
-        return None, e
-
-
-def organize_file(file_path, rating, is_pixiv=False, base_dirs=None):
-    folder_mapping = APP_CONFIG.get("folder_names", {})
-    folder_name = folder_mapping.get(rating)
-    if folder_name is None:
-        base = (
-            rating.split("_")[0]
-            if isinstance(rating, str) and "_" in rating
-            else rating
-        )
-        folder_name = folder_mapping.get(base, rating)
-
-    if is_pixiv:
-        if rating == "general" or rating.startswith("sensitive_"):
-            return False, file_path
-
-    try:
-        abs_path = os.path.abspath(file_path)
-        dir_name, file_name = os.path.dirname(abs_path), os.path.basename(abs_path)
-
-        target_dir = None
-        if is_pixiv and base_dirs:
-            best_base = None
-            for bp in base_dirs:
-                if abs_path.startswith(bp):
-                    if best_base is None or len(bp) > len(best_base):
-                        best_base = bp
-            if best_base:
-                parent_of_base = os.path.dirname(best_base)
-                rel_path = os.path.relpath(abs_path, best_base)
-                target_path = os.path.join(parent_of_base, folder_name, rel_path)
-                target_dir = os.path.dirname(target_path)
-
-        if target_dir is None:
-            target_dir = os.path.join(dir_name, folder_name)
-            target_path = os.path.join(target_dir, file_name)
-
-        if os.path.abspath(dir_name) == os.path.abspath(target_dir):
-            return False, abs_path
-
-        os.makedirs(target_dir, exist_ok=True)
-        if os.path.exists(target_path):
-            base_name, ext = os.path.splitext(file_name)
-            target_path = os.path.join(
-                target_dir, f"{base_name}_{uuid.uuid4().hex[:6]}{ext}"
-            )
-        shutil.move(abs_path, target_path)
-        return True, target_path
-    except Exception as e:
-        tqdm.write(f"[Warn] 移動失敗 {file_path}: {e}")
-        return False, file_path
-
-
-def collect_images(path_args, recursive=True):
-    collected = []
-    for p in path_args:
-        candidates = glob.glob(p, recursive=recursive) if "*" in p or "?" in p else [p]
-        for candidate in candidates:
-            if os.path.isdir(candidate):
-                print(
-                    f"[INFO] ディレクトリをスキャン中 (再帰={recursive}): {candidate}"
-                )
-                if recursive:
-                    for root, _, files in os.walk(candidate):
-                        for f in files:
-                            if f.lower().endswith(VALID_EXTS):
-                                collected.append(os.path.join(root, f))
-                else:
-                    try:
-                        for f in os.listdir(candidate):
-                            full_path = os.path.join(candidate, f)
-                            if os.path.isfile(full_path) and f.lower().endswith(
-                                VALID_EXTS
-                            ):
-                                collected.append(full_path)
-                    except OSError:
-                        pass
-            elif os.path.isfile(candidate) and candidate.lower().endswith(VALID_EXTS):
-                collected.append(candidate)
-    return sorted(list(set(collected)))
-
-
-def format_score_tags(rating_probs, config=None):
-    if config is None:
-        config = APP_CONFIG
-    tags = []
-    if isinstance(rating_probs, (float, int, np.floating)):
-        rating_probs = [0.0, float(rating_probs), 0.0, 0.0]
-
-    categories = ["general", "sensitive", "questionable", "explicit"]
-    record_raw = config.get("record_raw_score", True)
-    record_pct = config.get("record_rating_percentages", True)
-
-    raw_fmt_tmpl = config.get("raw_score_format", "{rating}_score:{raw_score:.4f}")
-    pct_fmt_tmpl = config.get("percentage_format", "{rating}:{percentage}%")
-
-    for i, cat in enumerate(categories):
-        if i < len(rating_probs):
-            prob = float(rating_probs[i])
-            pct_str = f"{prob * 100:.1f}"
-            if record_raw:
-                if "{rating}" in raw_fmt_tmpl or "{cat}" in raw_fmt_tmpl:
-                    try:
-                        tags.append(
-                            raw_fmt_tmpl.format(
-                                rating=cat, cat=cat, raw_score=prob
-                            )
-                        )
-                    except Exception:
-                        tags.append(f"{cat}_score:{prob:.4f}")
-                elif cat == "sensitive":
-                    try:
-                        tags.append(raw_fmt_tmpl.format(raw_score=prob))
-                    except Exception:
-                        tags.append(f"sensitive_score:{prob:.4f}")
-                else:
-                    tags.append(f"{cat}_score:{prob:.4f}")
-            if record_pct:
-                if "{rating}" in pct_fmt_tmpl or "{cat}" in pct_fmt_tmpl:
-                    try:
-                        tags.append(
-                            pct_fmt_tmpl.format(
-                                rating=cat, cat=cat, percentage=pct_str
-                            )
-                        )
-                    except Exception:
-                        tags.append(f"{cat}:{pct_str}%")
-                elif cat == "sensitive":
-                    try:
-                        tags.append(pct_fmt_tmpl.format(percentage=pct_str))
-                    except Exception:
-                        tags.append(f"sensitive:{pct_str}%")
-                else:
-                    tags.append(f"{cat}:{pct_str}%")
-    return tags
-
-
-def calculate_rating_severity(rating_probs, rating_idx):
-    """
-    WD14 の4 rating scoreから、選択されたrating帯内部の位置を
-    0.0〜1.0として算出し、それを4帯をまたぐ連続severityへ変換する。
-
-    Gen / Sen / Que / Exp は4択確率として合算・正規化しない。
-    ratingの順序に従い、現在の帯と隣接する上下のrating情報を使う。
-
-    Sensitive帯:
-        下側: Sen が Gen よりどれだけ優勢か
-        上側: Que の絶対スコアを対数スケールで評価
-
-    Questionable帯:
-        下側: Que が Sen よりどれだけ優勢か
-        上側: Exp の絶対スコアを対数スケールで評価
-
-    これにより、
-        Que ↑ → Sensitive帯のseverity ↑
-        Exp ↑ → Questionable帯のseverity ↑
-    を単調に保ちつつ、Gen が極端に低いだけでSensitive帯が
-    一気に最上位へ飛ぶことを防ぐ。
-
-    R-00 / R-18 の基本判定条件はここでは変更しない。
-    """
-    probs = np.asarray(rating_probs[:4], dtype=np.float64)
-    if probs.shape[0] != 4:
-        raise ValueError("rating_probs must contain exactly 4 rating scores")
-
-    gen_prob, sen_prob, que_prob, exp_prob = np.clip(
-        probs, 1e-6, 1.0 - 1e-6
+def load_runtime_model(
+    use_gpu: bool,
+    profile_name: str,
+    model_repo: Optional[str] = None,
+    model_file: Optional[str] = None,
+    tags_file: Optional[str] = None,
+) -> RuntimeModel:
+    profiles = APP_CONFIG.get("model_profiles", MODEL_PROFILES)
+    profile = get_model_profile(profile_name, profiles)
+    metadata = DBV4Metadata.load(
+        profile,
+        base_dir=SCRIPT_DIR,
+        model_repo_override=model_repo,
+        model_file_override=model_file,
+        tags_file_override=tags_file,
+        load_model=True,
     )
+    preprocessor = DBV4Preprocessor.from_metadata(metadata)
+    providers = build_providers(use_gpu)
+    session_options = ort.SessionOptions()
+    session_options.log_severity_level = 3
+    try:
+        session = ort.InferenceSession(
+            metadata.model_path,
+            sess_options=session_options,
+            providers=providers,
+        )
+    except Exception as exc:
+        if use_gpu:
+            raise RuntimeError(f"DBV4 GPUプロバイダの初期化に失敗しました: {exc}") from exc
+        session = ort.InferenceSession(
+            metadata.model_path,
+            sess_options=session_options,
+            providers=["CPUExecutionProvider"],
+        )
+    active = session.get_providers()
+    print(f"[INFO] DBV4モデル: {metadata.repo_id} ({metadata.profile_name})")
+    print(f"[INFO] ラベル数: {metadata.label_count}")
+    print(f"[INFO] metadata version: {metadata.metadata_version}")
+    print(f"[INFO] 入力 shape: {session.get_inputs()[0].shape}")
+    print(f"[INFO] アクティブプロバイダ: {active}")
+    if use_gpu:
+        active_names = {item[0] if isinstance(item, tuple) else item for item in active}
+        candidate_names = {
+            item[0] if isinstance(item, tuple) else item
+            for item in providers
+            if (item[0] if isinstance(item, tuple) else item) != "CPUExecutionProvider"
+        }
+        if not active_names.intersection(candidate_names):
+            raise RuntimeError("DBV4モデルでGPU Execution Providerを有効化できませんでした。")
+    return RuntimeModel(metadata, preprocessor, session)
 
-    def pairwise_position(upper_prob, lower_prob):
-        upper_logit = np.log(upper_prob / (1.0 - upper_prob))
-        lower_logit = np.log(lower_prob / (1.0 - lower_prob))
-        return float(
-            1.0 / (1.0 + np.exp(-(upper_logit - lower_logit)))
-        )
 
-    def score_position(score, reference_percent):
-        score_percent = float(score * 100.0)
-        reference_percent = float(reference_percent)
-        return float(
-            np.clip(
-                np.log1p(score_percent) / np.log1p(reference_percent),
-                0.0,
-                1.0,
-            )
-        )
+def warmup_runtime(runtime: RuntimeModel, batch_size: int) -> float:
+    active = runtime.session.get_providers()
+    compiling = {
+        "TensorrtExecutionProvider",
+        "OpenVINOExecutionProvider",
+        "MIGraphXExecutionProvider",
+        "DmlExecutionProvider",
+    }
+    if not any(
+        (provider[0] if isinstance(provider, tuple) else provider) in compiling
+        for provider in active
+    ):
+        return 0.0
+    print(f"[INFO] コンパイル系EPのウォームアップ推論を実行します (batch={batch_size})...")
+    started = time.time()
+    image = Image.new("RGB", (512, 512), (0, 0, 0))
+    runtime.predict_images([image] * max(1, batch_size))
+    if batch_size > 1:
+        runtime.predict_images([image])
+    elapsed = time.time() - started
+    print(f"[INFO] ウォームアップ完了 (所要時間: {elapsed:.2f}秒)。エンジンの準備が整いました。")
+    return elapsed
 
-    if rating_idx == 1:
-        lower_position = pairwise_position(sen_prob, gen_prob)
-        upper_position = score_position(
-            que_prob,
-            APP_CONFIG.get(
-                "rating_severity_sensitive_upper_reference",
-                25.0,
-            ),
-        )
-    elif rating_idx == 2:
-        lower_position = pairwise_position(que_prob, sen_prob)
-        upper_position = score_position(
-            exp_prob,
-            APP_CONFIG.get(
-                "rating_severity_questionable_upper_reference",
-                40.0,
-            ),
-        )
+
+def calculate_rating_severity(
+    scores: Dict[str, float],
+    base_rating: str,
+    sensitive_reference: float,
+    questionable_reference: float,
+) -> float:
+    values = [max(1e-6, min(1.0 - 1e-6, float(scores[name]))) for name in DBV4_RATING_NAMES]
+    gen, sen, que, exp = values
+
+    def pairwise_position(upper: float, lower: float) -> float:
+        upper_logit = np.log(upper / (1.0 - upper))
+        lower_logit = np.log(lower / (1.0 - lower))
+        return float(1.0 / (1.0 + np.exp(-(upper_logit - lower_logit))))
+
+    def score_position(score: float, reference_percent: float) -> float:
+        return float(np.clip(np.log1p(score * 100.0) / np.log1p(reference_percent), 0.0, 1.0))
+
+    if base_rating == "sensitive":
+        lower = pairwise_position(sen, gen)
+        upper = score_position(que, sensitive_reference)
+        band = 1
+    elif base_rating == "questionable":
+        lower = pairwise_position(que, sen)
+        upper = score_position(exp, questionable_reference)
+        band = 2
     else:
-        return 0.0 if rating_idx <= 0 else 1.0
+        return 0.0 if base_rating == "general" else 1.0
 
-    local_position = np.sqrt(lower_position * upper_position)
-    band_position = (float(rating_idx) + local_position) / 4.0
-    return float(np.clip(band_position, 0.0, 1.0))
+    return float(np.clip((band + np.sqrt(lower * upper)) / 4.0, 0.0, 1.0))
 
 
-def determine_rating_sublevel(
-    base_rating,
-    rating_severity,
-    thresholds=None,
-):
-    """
-    Sensitive / Questionable の連続severityを、それぞれ0〜4の5段階suffixへ変換する。
-
-    rating_severity:
-        General = 0.0〜0.25
-        Sensitive = 0.25〜0.50
-        Questionable = 0.50〜0.75
-        Explicit = 0.75〜1.00
-
-    Sensitive と Questionable は同じ0〜4分割基準を使うため、
-    R-15_4 → R-17_0 がseverity軸上で隣接する。
-    """
-    if thresholds is None:
-        thresholds = APP_CONFIG.get(
-            "rating_sublevel_thresholds_5way",
-            [0.20, 0.40, 0.60, 0.80],
-        )
-
-    if len(thresholds) != 4:
-        raise ValueError(
-            "rating_sublevel_thresholds_5way must contain exactly 4 thresholds"
-        )
-
+def determine_rating_sublevel(base_rating: str, severity: float) -> str:
     if base_rating not in ("sensitive", "questionable"):
         return base_rating
-
-    band_index = 1 if base_rating == "sensitive" else 2
-    local_position = np.clip(
-        float(rating_severity) * 4.0 - band_index,
-        0.0,
-        np.nextafter(1.0, 0.0),
-    )
-
-    sublevel = 4
-    for i, threshold in enumerate(thresholds):
-        if local_position < float(threshold):
-            sublevel = i
-            break
-
-    return f"{base_rating}_{sublevel}"
+    thresholds = APP_CONFIG.get("rating_sublevel_thresholds_5way", [0.20, 0.40, 0.60, 0.80])
+    if len(thresholds) != 4:
+        raise ValueError("rating_sublevel_thresholds_5way must contain exactly 4 values")
+    band = 1 if base_rating == "sensitive" else 2
+    local = float(np.clip(severity * 4.0 - band, 0.0, np.nextafter(1.0, 0.0)))
+    for index, threshold in enumerate(thresholds):
+        if local < float(threshold):
+            return f"{base_rating}_{index}"
+    return f"{base_rating}_4"
 
 
 def calculate_rating(
-    probs,
-    tags,
-    rating_thresh,
-    ignore_sensitive,
-    gen_thresh,
-    fname_disp="",
-):
-    rating_probs = probs[:4]
-    if rating_probs[0] >= gen_thresh:
-        rating_idx = 0
+    metadata: DBV4Metadata,
+    probabilities: Sequence[float],
+    rating_thresh: Optional[float],
+    ignore_sensitive: bool,
+    general_threshold: float,
+    fname_disp: str = "",
+) -> str:
+    scores = metadata.get_rating_scores(probabilities)
+    if scores["general"] >= general_threshold:
+        base = "general"
+    elif rating_thresh is not None:
+        non_general = sum(scores[name] for name in DBV4_RATING_NAMES[1:])
+        base = max(DBV4_RATING_NAMES[1:], key=scores.get) if non_general > rating_thresh else "general"
     else:
-        if rating_thresh is not None:
-            rating_idx = (
-                np.argmax(rating_probs[1:]) + 1
-                if np.sum(rating_probs[1:]) > rating_thresh
-                else 0
-            )
-        else:
-            rating_idx = np.argmax(rating_probs)
-    rating = tags[rating_idx]
+        base = max(DBV4_RATING_NAMES, key=scores.get)
 
-    if rating in ("sensitive", "questionable"):
-        rating_severity = calculate_rating_severity(rating_probs, rating_idx)
+    rating = base
+    if base in ("sensitive", "questionable"):
         rating = determine_rating_sublevel(
-            rating,
-            rating_severity,
+            base,
+            calculate_rating_severity(
+                scores,
+                base,
+                float(APP_CONFIG.get("rating_severity_sensitive_upper_reference", 25.0)),
+                float(APP_CONFIG.get("rating_severity_questionable_upper_reference", 40.0)),
+            ),
         )
-
-    if rating.startswith("sensitive_") and ignore_sensitive:
+    if ignore_sensitive and rating.startswith("sensitive_"):
         rating = "general"
 
     if fname_disp:
-        fmt_prob = lambda p: "100.0%" if p * 100 >= 100 else f"{p * 100:04.1f}%"
-        b_gen, b_sen, b_que, b_exp = (
-            get_bar(rating_probs[0], Colors.GREEN),
-            get_bar(rating_probs[1], Colors.YELLOW),
-            get_bar(rating_probs[2], Colors.MAGENTA),
-            get_bar(rating_probs[3], Colors.RED),
-        )
-        folder_mapping = APP_CONFIG.get("folder_names", {})
-        folder_name = folder_mapping.get(rating, rating)
-        res_color = Colors.CYAN
-        if rating == "explicit":
-            res_color = Colors.RED
-        elif rating == "questionable":
-            res_color = Colors.MAGENTA
-        elif "sensitive" in rating:
-            res_color = Colors.YELLOW
-        elif rating == "general":
-            res_color = Colors.GREEN
-        tqdm.write(
-            f"[{fname_disp}] Gen:{b_gen}{fmt_prob(rating_probs[0])} "
-            f"Sen:{b_sen}{fmt_prob(rating_probs[1])} "
-            f"Que:{b_que}{fmt_prob(rating_probs[2])} "
-            f"Exp:{b_exp}{fmt_prob(rating_probs[3])} "
-            f"=> {res_color}[{folder_name}]{Colors.RESET}"
+        values = [scores[name] for name in DBV4_RATING_NAMES]
+        bars = [
+            get_bar(values[0], Colors.GREEN),
+            get_bar(values[1], Colors.YELLOW),
+            get_bar(values[2], Colors.MAGENTA),
+            get_bar(values[3], Colors.RED),
+        ]
+        folder = APP_CONFIG.get("folder_names", {}).get(rating, rating)
+        color = Colors.CYAN
+        if rating == "general":
+            color = Colors.GREEN
+        elif rating.startswith("sensitive"):
+            color = Colors.YELLOW
+        elif rating.startswith("questionable"):
+            color = Colors.MAGENTA
+        elif rating == "explicit":
+            color = Colors.RED
+        safe_write(
+            f"[{fname_disp}] Gen:{bars[0]}{values[0] * 100:04.1f}% "
+            f"Sen:{bars[1]}{values[1] * 100:04.1f}% "
+            f"Que:{bars[2]}{values[2] * 100:04.1f}% "
+            f"Exp:{bars[3]}{values[3] * 100:04.1f}% "
+            f"=> {color}[{folder}]{Colors.RESET}"
         )
     return rating
 
 
-class TagServerHandler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            content_length = int(self.headers["Content-Length"])
-            post_data = self.rfile.read(content_length)
-            img = Image.open(io.BytesIO(post_data))
-            img_input = preprocess(img)
-            probs = sess_global.run([label_name_cache], {input_name_cache: img_input})[
-                0
-            ][0]
-            response_data = json.dumps(probs.astype(float).tolist())
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            self.wfile.write(response_data.encode("utf-8"))
-        except Exception:
-            self.send_response(500)
-            self.end_headers()
+def format_score_tags(metadata: DBV4Metadata, probabilities: Sequence[float]) -> List[str]:
+    scores = metadata.get_rating_scores(probabilities)
+    result: List[str] = []
+    raw_enabled = bool(APP_CONFIG.get("record_raw_score", True))
+    pct_enabled = bool(APP_CONFIG.get("record_rating_percentages", True))
+    raw_format = APP_CONFIG.get("raw_score_format", "{rating}_score:{raw_score:.4f}")
+    pct_format = APP_CONFIG.get("percentage_format", "{rating}:{percentage}%")
+    result.append(metadata.rating_tags_marker)
+    for name in DBV4_RATING_NAMES:
+        score = scores[name]
+        if raw_enabled:
+            try:
+                result.append(raw_format.format(rating=name, cat=name, raw_score=score))
+            except Exception:
+                result.append(f"{name}_score:{score:.4f}")
+        if pct_enabled:
+            percentage = f"{score * 100:.1f}"
+            try:
+                result.append(pct_format.format(rating=name, cat=name, percentage=percentage))
+            except Exception:
+                result.append(f"{name}:{percentage}%")
+    return result
 
 
-def run_server(port, use_gpu, model_repo, model_file, tags_file):
-    init_global_model(use_gpu, model_repo, model_file, tags_file)
-    server_address = ("0.0.0.0", port)
-    httpd = HTTPServer(server_address, TagServerHandler)
-    print(f"\n[INFO] サーバー稼働中 Port: {port}")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-
-
-def process_images(args):
-    host, port, is_client = args.host, args.port, args.mode == "client"
-    gen_thresh = APP_CONFIG.get("general_threshold", 0.40)
-    client_timeout = APP_CONFIG.get("client_timeout", 15)
-
-    runtime_config = dict(APP_CONFIG)
-    if args.record_ratio is not None:
-        runtime_config["record_raw_score"] = args.record_ratio
-        runtime_config["record_rating_percentages"] = args.record_ratio
-
-    if not is_client:
-        print("[INFO] モデルをロード中...")
-        init_global_model(args.gpu, args.model_repo, args.model_file, args.tags_file)
-    server_url = f"http://{host}:{port}"
-    if is_client:
-        print(f"[INFO] サーバーに接続: {server_url} (Timeout: {client_timeout}s)")
-    need_et = (not args.no_tag) or args.organize
-    if need_et:
-        et_wrapper.start()
-    tags = tags_global
-    if is_client:
-        try:
-            tags_path = resolve_hf_or_local(args.model_repo, args.tags_file, "タグCSV")
-        except Exception as e:
-            print(f"[ERROR] タグCSVの読み込みに失敗しました: {e}")
-            if need_et:
-                et_wrapper.stop()
-            return
-        tags = load_tags_from_path(tags_path)
-    use_recursive = args.recursive if args.recursive is not None else not args.organize
-    target_files = collect_images(args.images, recursive=use_recursive)
-
-    base_dirs = []
-    for p in args.images:
-        base = p.split("*")[0].split("?")[0]
-        abs_base = os.path.abspath(base)
-        if not os.path.isdir(abs_base):
-            abs_base = os.path.dirname(abs_base)
-        base_dirs.append(abs_base)
-
-    if not target_files:
-        print("[WARN] 対象ファイルが見つかりません。")
-        if need_et:
-            et_wrapper.stop()
-        return
-    batch_size = args.batch_size if args.batch_size > 0 else 1
-    if is_client and batch_size > 1:
-        print("[WARN] クライアントモードではバッチ推論を使用できません。")
-        batch_size = 1
-    if (not is_client) and MODEL_BATCH_LIMIT is not None:
-        if MODEL_BATCH_LIMIT <= 1 and batch_size > 1:
-            print(
-                "[WARN] このモデルはバッチ推論に非対応のため、batch-size を 1 に変更します。"
-            )
-            batch_size = 1
-        elif batch_size > MODEL_BATCH_LIMIT:
-            print(
-                f"[WARN] batch-size がモデル上限({MODEL_BATCH_LIMIT})を超えているため、{MODEL_BATCH_LIMIT} に変更します。"
-            )
-            batch_size = MODEL_BATCH_LIMIT
-    io_workers = args.io_workers
-    if io_workers == -1:
-        io_workers = max(2, min(4, (os.cpu_count() or 1) // 2)) if batch_size > 1 else 0
-    elif io_workers is not None and io_workers < 0:
-        io_workers = 0
-    if (not is_client) and batch_size > 1:
-        print(f"[INFO] バッチ推論: {batch_size} / IOワーカー: {io_workers}")
-
-    # 確定された batch_size に対応したウォームアップ推論（エンジン構築）
-    warmup_time = 0.0
-    if sess_global is not None:
-        try:
-            active_p = sess_global.get_providers()
-            compiling_providers = {
-                "TensorrtExecutionProvider",
-                "OpenVINOExecutionProvider",
-                "MIGraphXExecutionProvider",
-                "DmlExecutionProvider",
-            }
-            active_compiling = [
-                p
-                for p in active_p
-                if (p[0] if isinstance(p, tuple) else p) in compiling_providers
-            ]
-            if active_compiling:
-                print(
-                    f"[INFO] ウォームアップ推論（バッチサイズ: {batch_size}）を実行中..."
-                )
-                t_wu_start = time.time()
-                dummy_shape_full = (batch_size, 448, 448, 3)
-                dummy_input_full = np.zeros(dummy_shape_full, dtype=np.float32)
-                sess_global.run(
-                    [label_name_cache], {input_name_cache: dummy_input_full}
-                )
-                if batch_size > 1:
-                    dummy_shape_single = (1, 448, 448, 3)
-                    dummy_input_single = np.zeros(dummy_shape_single, dtype=np.float32)
-                    sess_global.run(
-                        [label_name_cache], {input_name_cache: dummy_input_single}
-                    )
-                warmup_time = time.time() - t_wu_start
-                print(
-                    f"[INFO] ウォームアップ完了 (所要時間: {warmup_time:.2f}秒)。エンジンの準備が整いました。"
-                )
-        except Exception as e:
-            print(f"[WARN] ウォームアップ推論スキップ: {e}")
-
-    processed_count, skipped_count, organized_count = 0, 0, 0
-    inferred_count, inferred_time = 0, 0.0
-    skipped_tag_count, skipped_tag_time = 0, 0.0
-    batch_history = []
-
-    pbar = tqdm(total=len(target_files), unit="img", dynamic_ncols=True)
-
-    def update_pbar_postfix():
-        inf_sp = (
-            f"{inferred_count / inferred_time:.1f}/s" if inferred_time > 0 else "0.0/s"
-        )
-        skip_sp = (
-            f"{skipped_tag_count / skipped_tag_time:.1f}/s"
-            if skipped_tag_time > 0
-            else "0.0/s"
-        )
-        pbar.set_postfix_str(
-            f"推論:{inferred_count}枚({inf_sp}) Skip:{skipped_tag_count}枚({skip_sp})"
-        )
-
-    executor = (
-        ThreadPoolExecutor(max_workers=io_workers)
-        if (not is_client and batch_size > 1 and io_workers > 0)
-        else None
+def is_score_tag(tag: str) -> bool:
+    return bool(
+        re.match(r"^(general|sensitive|questionable|explicit)_score:[0-9.]+$", tag)
+        or re.match(r"^(general|sensitive|questionable|explicit):[0-9.]+%$", tag)
     )
 
-    def finalize_result(img_path, existing_tags, detected_tags, rating, probs):
-        nonlocal processed_count, skipped_count, organized_count
-        final_path = img_path
+
+def extract_raw_rating_scores(
+    metadata: DBV4Metadata,
+    tags: Sequence[str],
+) -> Optional[List[float]]:
+    if metadata.rating_tags_marker not in tags:
+        return None
+    scores: Dict[str, float] = {}
+    pattern = re.compile(r"^(general|sensitive|questionable|explicit)_score:([0-9.]+)$")
+    for tag in tags:
+        match = pattern.match(tag.strip())
+        if match:
+            try:
+                scores[match.group(1)] = float(match.group(2))
+            except ValueError:
+                pass
+    if any(name not in scores for name in DBV4_RATING_NAMES):
+        return None
+    return [scores[name] for name in DBV4_RATING_NAMES]
+
+
+def preserve_existing_tags(tags: Sequence[str]) -> List[str]:
+    return [
+        tag.strip()
+        for tag in tags
+        if tag.strip()
+        and tag.strip() not in RATING_TAGS
+        and not is_score_tag(tag.strip())
+        and not tag.strip().startswith("dbv4_model:")
+    ]
+
+
+def organize_file(
+    file_path: str,
+    rating: str,
+    is_pixiv: bool = False,
+    base_dirs: Optional[Sequence[str]] = None,
+) -> Tuple[bool, str]:
+    mapping = APP_CONFIG.get("folder_names", {})
+    folder_name = mapping.get(rating, rating)
+    if is_pixiv and (rating == "general" or rating.startswith("sensitive_")):
+        return False, file_path
+    try:
+        source = os.path.abspath(file_path)
+        source_dir = os.path.dirname(source)
+        filename = os.path.basename(source)
+        target_dir = os.path.join(source_dir, folder_name)
+        target_path = os.path.join(target_dir, filename)
+        if is_pixiv and base_dirs:
+            matches = [base for base in base_dirs if source.startswith(base)]
+            if matches:
+                base = max(matches, key=len)
+                relative = os.path.relpath(source, base)
+                target_path = os.path.join(
+                    os.path.dirname(base),
+                    folder_name,
+                    relative,
+                )
+                target_dir = os.path.dirname(target_path)
+        if os.path.abspath(source_dir) == os.path.abspath(target_dir):
+            return False, source
+        os.makedirs(target_dir, exist_ok=True)
+        if os.path.exists(target_path):
+            stem, ext = os.path.splitext(filename)
+            target_path = os.path.join(target_dir, f"{stem}_{uuid.uuid4().hex[:6]}{ext}")
+        shutil.move(source, target_path)
+        return True, target_path
+    except Exception as exc:
+        safe_write(f"[WARN] 移動失敗 {file_path}: {exc}")
+        return False, file_path
+
+
+def collect_images(paths: Sequence[str], recursive: bool = True) -> List[str]:
+    collected: List[str] = []
+    for raw_path in paths:
+        candidates = glob.glob(raw_path, recursive=recursive) if "*" in raw_path or "?" in raw_path else [raw_path]
+        for candidate in candidates:
+            if os.path.isdir(candidate):
+                if recursive:
+                    for root, _, files in os.walk(candidate):
+                        collected.extend(
+                            os.path.join(root, name)
+                            for name in files
+                            if name.lower().endswith(VALID_EXTS)
+                        )
+                else:
+                    try:
+                        collected.extend(
+                            os.path.join(candidate, name)
+                            for name in os.listdir(candidate)
+                            if os.path.isfile(os.path.join(candidate, name))
+                            and name.lower().endswith(VALID_EXTS)
+                        )
+                    except OSError:
+                        pass
+            elif os.path.isfile(candidate) and candidate.lower().endswith(VALID_EXTS):
+                collected.append(candidate)
+    return sorted(set(collected))
+
+
+class TagServerHandler(BaseHTTPRequestHandler):
+    runtime: Optional[RuntimeModel] = None
+
+    def do_POST(self) -> None:
+        try:
+            if not self.runtime:
+                raise RuntimeError("DBV4 runtimeが初期化されていません。")
+            length = int(self.headers.get("Content-Length", "0"))
+            image = Image.open(io.BytesIO(self.rfile.read(length))).convert("RGB")
+            probabilities = self.runtime.predict_images([image])[0]
+            payload = {
+                **self.runtime.metadata.summary(),
+                "probabilities": probabilities.astype(float).tolist(),
+            }
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as exc:
+            body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        return
+
+
+def run_server(args: argparse.Namespace) -> None:
+    runtime = load_runtime_model(
+        args.gpu,
+        args.model_profile,
+        args.model_repo,
+        args.model_file,
+        args.tags_file,
+    )
+    TagServerHandler.runtime = runtime
+    server = HTTPServer(("0.0.0.0", args.port), TagServerHandler)
+    print(f"\n[INFO] DBV4推論サーバー稼働中 Port: {args.port}")
+    print(f"[INFO] model_id={runtime.metadata.repo_id}")
+    print(f"[INFO] output_size={runtime.metadata.label_count}")
+    print(f"[INFO] metadata_version={runtime.metadata.metadata_version}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def load_client_metadata(args: argparse.Namespace) -> DBV4Metadata:
+    profiles = APP_CONFIG.get("model_profiles", MODEL_PROFILES)
+    profile = get_model_profile(args.model_profile, profiles)
+    return DBV4Metadata.load(
+        profile,
+        base_dir=SCRIPT_DIR,
+        model_repo_override=args.model_repo,
+        model_file_override=args.model_file,
+        tags_file_override=args.tags_file,
+        load_model=False,
+    )
+
+
+def client_predict(
+    server_url: str,
+    image_path: str,
+    metadata: DBV4Metadata,
+    timeout: int,
+) -> np.ndarray:
+    with open(image_path, "rb") as f:
+        data = f.read()
+    request = urllib.request.Request(server_url, data=data, method="POST")
+    request.add_header("Content-Type", "application/octet-stream")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if isinstance(payload, list):
+        probabilities = np.asarray(payload, dtype=np.float32)
+    elif isinstance(payload, dict):
+        if payload.get("protocol") != 1:
+            raise RuntimeError("サーバーのDBV4 protocol versionが不一致です。")
+        if payload.get("model_id") != metadata.repo_id:
+            raise RuntimeError("サーバーとクライアントのmodel_idが不一致です。")
+        if int(payload.get("output_size", -1)) != metadata.label_count:
+            raise RuntimeError("サーバーとクライアントのoutput sizeが不一致です。")
+        if payload.get("metadata_version") != metadata.metadata_version:
+            raise RuntimeError("サーバーとクライアントのmetadata versionが不一致です。")
+        probabilities = np.asarray(payload.get("probabilities", []), dtype=np.float32)
+    else:
+        raise RuntimeError("サーバー応答形式が不正です。")
+    if probabilities.shape[0] != metadata.label_count:
+        raise RuntimeError("DBV4 output sizeがmetadataと一致しません。")
+    return probabilities
+
+
+def process_images(args: argparse.Namespace) -> None:
+    is_client = args.mode == "client"
+    metadata = load_client_metadata(args) if is_client else None
+    runtime: Optional[RuntimeModel] = None
+    if not is_client:
+        runtime = load_runtime_model(
+            args.gpu,
+            args.model_profile,
+            args.model_repo,
+            args.model_file,
+            args.tags_file,
+        )
+        metadata = runtime.metadata
+
+    assert metadata is not None
+    need_exiftool = (not args.no_tag) or args.organize
+    if need_exiftool:
+        et_wrapper.start()
+
+    if args.record_ratio is not None:
+        APP_CONFIG["record_raw_score"] = args.record_ratio
+        APP_CONFIG["record_rating_percentages"] = args.record_ratio
+
+    recursive = args.recursive if args.recursive is not None else not args.organize
+    target_files = collect_images(args.images, recursive)
+    if not target_files:
+        print("[WARN] 対象ファイルが見つかりません。")
+        if need_exiftool:
+            et_wrapper.stop()
+        return
+
+    base_dirs = []
+    for raw_path in args.images:
+        base = os.path.abspath(raw_path.split("*")[0].split("?")[0])
+        if not os.path.isdir(base):
+            base = os.path.dirname(base)
+        base_dirs.append(base)
+
+    batch_size = 1 if is_client else max(1, args.batch_size)
+    if runtime and runtime.batch_limit is not None:
+        batch_size = min(batch_size, max(1, runtime.batch_limit))
+    io_workers = args.io_workers
+    if io_workers < 0:
+        io_workers = max(2, min(4, (os.cpu_count() or 1) // 2)) if batch_size > 1 else 0
+
+    if runtime and batch_size > 1:
+        print(f"[INFO] DBV4 batch-size={batch_size}, io-workers={io_workers}")
+
+    warmup_time = 0.0
+    if runtime:
+        try:
+            warmup_time = warmup_runtime(runtime, batch_size)
+        except Exception as exc:
+            print(f"[WARN] ウォームアップ推論をスキップしました: {exc}")
+
+    processed = organized = 0
+    inferred = skipped = 0
+    inferred_time = skipped_time = 0.0
+    executor = (
+        ThreadPoolExecutor(max_workers=io_workers)
+        if runtime and batch_size > 1 and io_workers > 0
+        else None
+    )
+    pending: List[Dict[str, Any]] = []
+    report_data: List[Dict[str, Any]] = []
+    progress = tqdm(total=len(target_files), unit="img", dynamic_ncols=True)
+
+    def finalize(
+        path: str,
+        existing_tags: Sequence[str],
+        detected_tags: Sequence[str],
+        rating: str,
+        probabilities: Optional[np.ndarray],
+    ) -> None:
+        nonlocal processed, organized
+        final_path = path
         if detected_tags and (not args.no_tag or args.organize):
-            if et_wrapper.write_tags(img_path, detected_tags):
-                processed_count += 1
-            else:
-                skipped_count += 1
-        else:
-            skipped_count += 1
-        if args.organize and rating:
-            moved, new_path = organize_file(
-                img_path, rating, getattr(args, "pixiv", False), base_dirs
-            )
+            if et_wrapper.write_tags(path, detected_tags):
+                processed += 1
+        if args.organize:
+            moved, new_path = organize_file(path, rating, args.pixiv, base_dirs)
             if moved:
-                organized_count += 1
+                organized += 1
                 final_path = new_path
-        if not args.no_report and probs is not None:
-            REPORT_DATA.append(
+        if probabilities is not None and not args.no_report:
+            report_data.append(
                 {
                     "path": os.path.abspath(final_path),
                     "rating": rating,
-                    "probs": probs[:4].tolist(),
+                    "probs": [
+                        metadata.get_rating_scores(probabilities)[name]
+                        for name in DBV4_RATING_NAMES
+                    ],
+                    "model_id": metadata.repo_id,
+                    "metadata_version": metadata.metadata_version,
                 }
             )
-        pbar.update(1)
+        progress.update(1)
 
-    def handle_inference_result(item, probs):
-        fname_disp = os.path.basename(item["path"])
-        fname_disp = fname_disp[:17] + "..." if len(fname_disp) > 20 else fname_disp
+    def decode_and_finalize(item: Dict[str, Any], probabilities: np.ndarray) -> None:
+        display = os.path.basename(item["path"])
+        if len(display) > 20:
+            display = display[:17] + "..."
         rating = calculate_rating(
-            probs,
-            tags,
+            metadata,
+            probabilities,
             args.rating_thresh,
             args.ignore_sensitive,
-            gen_thresh,
-            fname_disp,
+            float(APP_CONFIG.get("general_threshold", 0.40)),
+            display,
         )
-        detected_tags = []
-        if rating:
-            detected_tags.append(rating)
-        score_tags = format_score_tags(probs[:4], runtime_config)
-        detected_tags.extend(score_tags)
-        for i, p in enumerate(probs):
-            if p > args.thresh:
-                tag_name = tags[i]
-                if tag_name not in detected_tags:
-                    detected_tags.append(tag_name)
-        for ext in item.get("existing_tags", []):
-            ext_clean = ext.strip()
-            if ext_clean in RATING_TAGS:
-                continue
-            if re.match(
-                r"^(general|sensitive|questionable|explicit)_score:([0-9\.]+)$",
-                ext_clean,
-            ):
-                continue
-            if re.match(
-                r"^(general|sensitive|questionable|explicit):([0-9\.]+)%$",
-                ext_clean,
-            ):
-                continue
-            if ext_clean not in detected_tags:
-                detected_tags.append(ext_clean)
-        finalize_result(
-            item["path"], item["existing_tags"], detected_tags, rating, probs
-        )
+        tags = [rating]
+        tags.extend(format_score_tags(metadata, probabilities))
+        tags.extend(metadata.decode_tags(probabilities, args.thresh))
+        for old_tag in preserve_existing_tags(item.get("existing_tags", [])):
+            if old_tag not in tags:
+                tags.append(old_tag)
+        finalize(item["path"], item.get("existing_tags", []), tags, rating, probabilities)
 
-    def run_batch(batch_items):
-        nonlocal inferred_count, inferred_time
-        if not batch_items:
+    def load_image(path: str) -> Tuple[Optional[Image.Image], Optional[Exception]]:
+        try:
+            with Image.open(path) as image:
+                return image.convert("RGB"), None
+        except Exception as exc:
+            return None, exc
+
+    def run_batch(items: Sequence[Dict[str, Any]]) -> None:
+        nonlocal inferred, inferred_time
+        if not runtime or not items:
             return
-        t_batch_start = time.time()
-        paths = [item["path"] for item in batch_items]
+        started = time.time()
         if executor:
-            results = list(executor.map(load_and_preprocess, paths))
+            loaded = list(executor.map(lambda item: load_image(item["path"]), items))
         else:
-            results = [load_and_preprocess(p) for p in paths]
-        valid_items, inputs = [], []
-        for item, (img_input, err) in zip(batch_items, results):
-            if err is not None:
-                tqdm.write(f"エラー {os.path.basename(item['path'])}: {err}")
-                pbar.update(1)
+            loaded = [load_image(item["path"]) for item in items]
+        valid_items: List[Dict[str, Any]] = []
+        images: List[Image.Image] = []
+        for item, (image, error) in zip(items, loaded):
+            if error or image is None:
+                safe_write(f"エラー {os.path.basename(item['path'])}: {error}")
+                progress.update(1)
                 continue
             valid_items.append(item)
-            inputs.append(img_input)
+            images.append(image)
         if not valid_items:
             return
-        batch_input = np.concatenate(inputs, axis=0) if len(inputs) > 1 else inputs[0]
         try:
-            batch_probs = sess_global.run(
-                [label_name_cache], {input_name_cache: batch_input}
-            )[0]
-        except Exception as e:
-            tqdm.write(f"[WARN] バッチ推論に失敗: {e} -> 1枚ずつに切り替えます。")
-            for item, img_input in zip(valid_items, inputs):
-                t_single = time.time()
+            predictions = runtime.predict_images(images)
+            elapsed = time.time() - started
+            inferred += len(valid_items)
+            inferred_time += elapsed
+            for item, prediction in zip(valid_items, predictions):
+                decode_and_finalize(item, prediction)
+        except Exception as exc:
+            safe_write(f"[WARN] DBV4バッチ推論に失敗: {exc} -> 1枚ずつに切り替えます。")
+            for item, image in zip(valid_items, images):
+                single_started = time.time()
                 try:
-                    probs = sess_global.run(
-                        [label_name_cache], {input_name_cache: img_input}
-                    )[0][0]
-                    t_el = time.time() - t_single
-                    inferred_count += 1
-                    inferred_time += t_el
-                    batch_history.append({"count": 1, "time": t_el})
-                    update_pbar_postfix()
-                    handle_inference_result(item, probs)
-                except Exception as e2:
-                    tqdm.write(f"エラー {os.path.basename(item['path'])}: {e2}")
-                    pbar.update(1)
-            return
+                    prediction = runtime.predict_images([image])[0]
+                    inferred += 1
+                    inferred_time += time.time() - single_started
+                    decode_and_finalize(item, prediction)
+                except Exception as single_exc:
+                    safe_write(f"エラー {os.path.basename(item['path'])}: {single_exc}")
+                    progress.update(1)
 
-        t_batch_elapsed = time.time() - t_batch_start
-        inferred_count += len(valid_items)
-        inferred_time += t_batch_elapsed
-        batch_history.append({"count": len(valid_items), "time": t_batch_elapsed})
-        update_pbar_postfix()
-
-        if len(valid_items) == 1:
-            probs_list = (
-                [batch_probs[0]]
-                if getattr(batch_probs, "ndim", 1) > 1
-                else [batch_probs]
-            )
-        else:
-            probs_list = batch_probs
-        for item, probs in zip(valid_items, probs_list):
-            handle_inference_result(item, probs)
-
-    pending = []
-    aborted = False
     try:
-        for img_path in target_files:
-            t_file_start = time.time()
-            try:
-                rating, existing_tags, need_inference = None, [], True
-                if need_et and et_wrapper.running:
-                    existing_tags = et_wrapper.get_tags(img_path)
-                if args.force:
-                    need_inference = True
-                elif existing_tags:
-                    if args.rating_thresh is not None:
-                        need_inference = True
-                    else:
-                        raw_scores = {}
-                        for t in existing_tags:
-                            m = re.match(
-                                r"^(general|sensitive|questionable|explicit)_score:([0-9\.]+)$",
-                                t.strip(),
-                            )
-                            if m:
-                                try:
-                                    raw_scores[m.group(1)] = float(m.group(2))
-                                except ValueError:
-                                    pass
-                        if len(raw_scores) == 4:
-                            p_list = [
-                                raw_scores["general"],
-                                raw_scores["sensitive"],
-                                raw_scores["questionable"],
-                                raw_scores["explicit"],
-                            ]
-                            rating = calculate_rating(
-                                p_list,
-                                ["general", "sensitive", "questionable", "explicit"],
-                                args.rating_thresh,
-                                args.ignore_sensitive,
-                                gen_thresh,
-                                fname_disp="",
-                            )
-                            need_inference = False
-                        else:
-                            need_inference = True
-                if need_inference:
-                    if is_client:
-                        t_client_start = time.time()
-                        with open(img_path, "rb") as f:
-                            img_data = f.read()
-                        req = urllib.request.Request(
-                            server_url, data=img_data, method="POST"
-                        )
-                        req.add_header("Content-Type", "application/octet-stream")
-                        with urllib.request.urlopen(req, timeout=client_timeout) as res:
-                            if res.status != 200:
-                                tqdm.write(f"Server Error: {res.status}")
-                                pbar.update(1)
-                                continue
-                            probs = np.array(json.loads(res.read().decode("utf-8")))
-                        t_client_elapsed = time.time() - t_client_start
-                        inferred_count += 1
-                        inferred_time += t_client_elapsed
-                        update_pbar_postfix()
-                        handle_inference_result(
-                            {"path": img_path, "existing_tags": existing_tags}, probs
-                        )
-                    else:
-                        pending.append(
-                            {"path": img_path, "existing_tags": existing_tags}
-                        )
-                        if len(pending) >= batch_size:
-                            run_batch(pending[:batch_size])
-                            pending = pending[batch_size:]
-                else:
-                    t_skip_elapsed = time.time() - t_file_start
-                    skipped_tag_count += 1
-                    skipped_tag_time += t_skip_elapsed
-                    update_pbar_postfix()
-                    finalize_result(img_path, existing_tags, [], rating, None)
-            except urllib.error.HTTPError as e:
-                tqdm.write(f"サーバー処理エラー {os.path.basename(img_path)}: {e}")
-                pbar.update(1)
+        for image_path in target_files:
+            started = time.time()
+            existing_tags = et_wrapper.get_tags(image_path) if need_exiftool else []
+            raw_scores = extract_raw_rating_scores(metadata, existing_tags) if not args.force else None
+
+            if raw_scores is not None and args.rating_thresh is None:
+                probabilities = np.zeros(metadata.label_count, dtype=np.float32)
+                for name, score in zip(DBV4_RATING_NAMES, raw_scores):
+                    probabilities[metadata.rating_indices[name]] = score
+                rating = calculate_rating(
+                    metadata,
+                    probabilities,
+                    None,
+                    args.ignore_sensitive,
+                    float(APP_CONFIG.get("general_threshold", 0.40)),
+                )
+                skipped += 1
+                skipped_time += time.time() - started
+                finalize(image_path, existing_tags, [], rating, None)
                 continue
-            except (urllib.error.URLError, socket.timeout) as e:
-                tqdm.write(f"接続エラー(タイムアウト含む): {e}")
-                aborted = True
-                break
-            except KeyboardInterrupt:
-                print("\n[INFO] 中断されました。")
-                aborted = True
-                sys.exit(0)
-            except Exception as e:
-                tqdm.write(f"エラー {os.path.basename(img_path)}: {e}")
-                pbar.update(1)
-        if not aborted and (not is_client) and pending:
-            run_batch(pending)
+
+            item = {"path": image_path, "existing_tags": existing_tags}
+            if is_client:
+                try:
+                    prediction = client_predict(
+                        f"http://{args.host}:{args.port}",
+                        image_path,
+                        metadata,
+                        int(APP_CONFIG.get("client_timeout", 15)),
+                    )
+                    inferred += 1
+                    inferred_time += time.time() - started
+                    decode_and_finalize(item, prediction)
+                except (urllib.error.URLError, socket.timeout) as exc:
+                    safe_write(f"接続エラー(タイムアウト含む): {exc}")
+                    break
+            else:
+                pending.append(item)
+                if len(pending) >= batch_size:
+                    run_batch(pending[:batch_size])
+                    pending = pending[batch_size:]
     finally:
+        if runtime and pending:
+            run_batch(pending)
         if executor:
             executor.shutdown(wait=True)
-        if need_et:
+        if need_exiftool:
             et_wrapper.stop()
-        pbar.close()
+        progress.close()
 
-    print(f"\n[完了] 処理結果サマリー:")
+    print("\n[完了] 処理結果サマリー:")
+    infer_speed = inferred / inferred_time if inferred_time else 0.0
+    skip_speed = skipped / skipped_time if skipped_time else 0.0
+    print(f"  ・推論実行ファイル (DBV4 AI演算あり): {inferred} 枚 | {infer_speed:.2f} img/s")
+    print(f"  ・演算スキップファイル (DBV4 score): {skipped} 枚 | {skip_speed:.2f} img/s")
     if warmup_time > 0:
-        print(f"  ・ウォームアップ時間 (エンジン事前構築) : {warmup_time:.2f} 秒")
+        print(f"  ・ウォームアップ: {warmup_time:.2f} 秒")
+    print(f"  ・詳細: タグ書き込み {processed} 枚, 整理移動 {organized} 枚")
 
-    if inferred_count > 0:
-        outlier_detected = False
-        main_count, main_time = inferred_count, inferred_time
-        first_b_time, first_b_count = 0.0, 0
-        if len(batch_history) >= 2:
-            first_b_count = batch_history[0]["count"]
-            first_b_time = batch_history[0]["time"]
-            t1_per_img = first_b_time / first_b_count
-
-            rest_count = sum(b["count"] for b in batch_history[1:])
-            rest_time = sum(b["time"] for b in batch_history[1:])
-            t_rest_per_img = rest_time / rest_count if rest_count > 0 else 0
-
-            if (
-                rest_count > 0
-                and (first_b_time > 1.0)
-                and (t1_per_img > 2.0 * t_rest_per_img)
-            ):
-                outlier_detected = True
-                main_count, main_time = rest_count, rest_time
-
-        inf_fps = main_count / main_time if main_time > 0 else 0
-        inf_ms = (main_time / main_count) * 1000 if main_count > 0 else 0
-        print(
-            f"  ・推論実行ファイル (AI演算あり) : {inferred_count} 枚 | 速度: {inf_fps:.2f} img/s ({inf_ms:.1f} ms/img)"
-        )
-        if outlier_detected:
-            all_fps = inferred_count / inferred_time if inferred_time > 0 else 0
-            t1_per_img_ms = (
-                (first_b_time / first_b_count) * 1000 if first_b_count > 0 else 0
-            )
-            print(
-                f"       ├─ 1枚目(初回バッチ)処理時間: {first_b_time:.2f} 秒 ({t1_per_img_ms:.1f} ms/img)"
-            )
-            print(
-                f"       ├─ 1枚目を含む全推論速度: {all_fps:.2f} img/s (合計処理時間: {inferred_time:.2f} 秒)"
-            )
-            print(
-                f"       └─ ※初回バッチの遅延 ({first_b_time:.2f}秒) をコンパイル外れ値としてメイン速度から自動除外しました。"
-            )
-    else:
-        print("  ・推論実行ファイル (AI演算あり) : 0 枚")
-
-    if skipped_tag_count > 0:
-        skip_fps = skipped_tag_count / skipped_tag_time if skipped_tag_time > 0 else 0
-        skip_ms = (
-            (skipped_tag_time / skipped_tag_count) * 1000
-            if skipped_tag_count > 0
-            else 0
-        )
-        print(
-            f"  ・演算スキップファイル (既存タグ) : {skipped_tag_count} 枚 | 速度: {skip_fps:.2f} img/s ({skip_ms:.1f} ms/img)"
-        )
-    else:
-        print("  ・演算スキップファイル (既存タグ) : 0 枚")
-
-    print(
-        f"  ・詳細: タグ書き込み: {processed_count} 枚, 整理移動: {organized_count} 枚"
-    )
-    if not args.no_report:
-        if REPORT_DATA:
-            with open(REPORT_LOG_FILE, "w", encoding="utf-8") as f:
-                json.dump(REPORT_DATA, f, ensure_ascii=False)
-            print(f"[INFO] レポート用ログを保存: {REPORT_LOG_FILE}")
-            if make_report:
-                print("[INFO] HTMLレポートを生成中...")
-                make_report.make_report()
-            else:
-                print(
-                    "[WARN] make_report モジュールが見つからないため、HTML生成をスキップします。"
-                )
-        else:
-            print("[INFO] レポート対象データがありませんでした。")
+    if report_data and not args.no_report:
+        with open(REPORT_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(report_data, f, ensure_ascii=False)
+        if make_report:
+            make_report.make_report()
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="WD14 Tagger Universal (日本語版)", add_help=False
-    )
+def create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="DBV4 Tagger Universal (日本語版)")
     parser.add_argument("images", nargs="*", help="処理対象の画像またはフォルダパス")
-    parser.add_argument_group("実行モード").add_argument(
-        "--mode",
-        choices=["standalone", "server", "client"],
-        default="standalone",
-        help="動作モード",
-    )
-    action_group = parser.add_argument_group("アクション設定")
-    action_group.add_argument(
-        "--no-tag", action="store_true", help="タグ付け処理を行わない"
-    )
-    action_group.add_argument(
-        "--organize",
-        action="store_true",
-        help="レーティングに基づいてフォルダ振り分けを行う",
-    )
-    action_group.add_argument(
-        "--pixiv",
-        action="store_true",
-        help="Pixiv整理モード（R17以上を親フォルダに移動、R15.5以下は移動しない。再帰・整理を強制）",
-    )
-    action_group.add_argument(
-        "--no-report", action="store_true", help="HTMLレポートを作成しない"
-    )
-    conf_group = parser.add_argument_group("判定・システム設定")
-    conf_group.add_argument(
-        "--thresh", type=float, default=0.35, help="タグ採用の確信度閾値"
-    )
-    conf_group.add_argument("--gpu", action="store_true", help="GPUを使用する")
-    conf_group.add_argument(
-        "--batch-size",
-        type=int,
-        default=4,
-        help="推論バッチサイズ（ローカル時のみ、デフォルト: 4 / 非対応時は自動で 1）",
-    )
-    conf_group.add_argument(
-        "--io-workers",
-        type=int,
-        default=-1,
-        help="前処理の並列ワーカー数（デフォルト: -1=自動）",
-    )
-    conf_group.add_argument("--force", action="store_true", help="強制再解析")
-    conf_group.add_argument(
-        "--recursive", action="store_const", const=True, default=None, help="再帰検索ON"
-    )
-    conf_group.add_argument(
-        "--no-recursive",
-        action="store_const",
-        const=False,
-        dest="recursive",
-        help="再帰検索OFF",
-    )
-    model_group = parser.add_argument_group("モデル設定")
-    model_group.add_argument(
-        "--model-repo",
+    parser.add_argument("--mode", choices=["standalone", "server", "client"], default="standalone")
+    parser.add_argument("--no-tag", action="store_true", help="タグ付け処理を行わない")
+    parser.add_argument("--organize", action="store_true", help="レーティングに基づきフォルダ整理を行う")
+    parser.add_argument("--pixiv", action="store_true")
+    parser.add_argument("--no-report", action="store_true")
+    parser.add_argument(
+        "--thresh",
+        type=float,
         default=None,
-        help="モデル/タグのHFリポジトリID（未指定時はconfig.jsonのmodel_repo）",
+        help="DBV4のtag best_thresholdを上書きする明示的な閾値",
     )
-    model_group.add_argument(
-        "--model-file",
+    parser.add_argument("--gpu", action="store_true", help="GPUを使用する")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--io-workers", type=int, default=-1)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--recursive", action="store_const", const=True, default=None)
+    parser.add_argument("--no-recursive", action="store_const", const=False, dest="recursive")
+    parser.add_argument(
+        "--model-profile",
+        choices=list(MODEL_PROFILES.keys()),
         default=None,
-        help="モデルファイル名またはパス（未指定時はconfig.jsonのmodel_file）",
+        help="DBV4モデルプロファイル",
     )
-    model_group.add_argument(
-        "--tags-file",
-        default=None,
-        help="タグCSVファイル名またはパス（未指定時はconfig.jsonのtags_file）",
-    )
-    net_group = parser.add_argument_group("ネットワーク設定")
-    net_group.add_argument("--host", default=None, help="サーバーIPアドレス")
-    net_group.add_argument("--port", type=int, default=None, help="ポート番号")
-    conf_group.add_argument(
-        "--sensitive-split-mode",
-        type=int,
-        choices=[2, 4, 6],
-        default=None,
-        help="Sensitiveの分割モード (2, 4, 6 / 未指定時はconfig.json参照)",
-    )
-    conf_group.add_argument(
-        "--record-ratio",
-        action="store_true",
-        default=None,
-        help="メタデータにRAWスコアおよび割合スコアを書き込む",
-    )
-    conf_group.add_argument(
-        "--no-record-ratio",
-        action="store_false",
-        dest="record_ratio",
-        help="メタデータへのスコア書き込みを無効化する",
-    )
-    misc_group = parser.add_argument_group("その他・旧機能")
-    misc_group.add_argument("--rating-thresh", type=float, default=None)
-    misc_group.add_argument("--ignore-sensitive", action="store_true")
-    misc_group.add_argument("--gen-config", action="store_true")
-    misc_group.add_argument("-h", "--help", action="help", help="ヘルプを表示")
-    args = parser.parse_args()
-    if args.pixiv:
-        args.organize = True
-        args.recursive = True
-    if IS_WINDOWS:
-        os.system("")
+    parser.add_argument("--model-repo", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--model-file", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--tags-file", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--host", default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--sensitive-split-mode", choices=[2, 4, 6], type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--record-ratio", action="store_true", default=None)
+    parser.add_argument("--no-record-ratio", action="store_false", dest="record_ratio")
+    parser.add_argument("--rating-thresh", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--ignore-sensitive", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--gen-config", action="store_true", help=argparse.SUPPRESS)
+    return parser
+
+
+def main() -> None:
+    args = create_parser().parse_args()
     if args.gen_config:
         load_config()
-        sys.exit(0)
-    if args.model_repo is None:
-        args.model_repo = APP_CONFIG.get("model_repo", DEFAULT_CONFIG.get("model_repo"))
-    if args.model_file is None:
-        args.model_file = APP_CONFIG.get("model_file", DEFAULT_CONFIG.get("model_file"))
-    if args.tags_file is None:
-        args.tags_file = APP_CONFIG.get("tags_file", DEFAULT_CONFIG.get("tags_file"))
+        return
+
+    profiles = APP_CONFIG.get("model_profiles", MODEL_PROFILES)
+    if args.model_profile is None:
+        args.model_profile = APP_CONFIG.get("model_profile", "balanced")
+    if args.model_profile not in profiles:
+        raise SystemExit(f"[ERROR] 不明なDBV4モデルプロファイルです: {args.model_profile}")
+
+    if args.sensitive_split_mode is not None:
+        print("[WARN] --sensitive-split-mode はDBV4移行後は非推奨です。R-15/R-17は5段階固定で処理します。")
+
+    if args.record_ratio is not None:
+        APP_CONFIG["record_raw_score"] = bool(args.record_ratio)
+        APP_CONFIG["record_rating_percentages"] = bool(args.record_ratio)
+
     if args.host is None:
         if args.mode == "client":
-            saved_hosts = APP_CONFIG.get(
-                "server_hosts", APP_CONFIG.get("server_host", ["localhost"])
-            )
-            if isinstance(saved_hosts, str):
-                saved_hosts = [saved_hosts]
-            if len(saved_hosts) == 1:
-                args.host = saved_hosts[0]
-            elif len(saved_hosts) > 1:
-                print(
-                    f"{Colors.CYAN}[INFO] 接続先サーバーが複数登録されています。{Colors.RESET}"
-                )
-                for i, h in enumerate(saved_hosts):
-                    print(f"  {i+1}: {h}")
-                while True:
-                    choice = input("接続先を選択してください: ")
-                    try:
-                        idx = int(choice) - 1
-                        if 0 <= idx < len(saved_hosts):
-                            args.host = saved_hosts[idx]
-                            break
-                        else:
-                            print("無効な番号じゃ。正しい数値を入力するのじゃ。")
-                    except ValueError:
-                        print("数値を入力するのじゃ。")
+            hosts = APP_CONFIG.get("server_hosts", ["localhost"])
+            hosts = [hosts] if isinstance(hosts, str) else hosts
+            if len(hosts) == 1:
+                args.host = hosts[0]
             else:
-                args.host = "localhost"
+                print(f"{Colors.CYAN}[INFO] 接続先サーバーを選択してください。{Colors.RESET}")
+                for index, host in enumerate(hosts, 1):
+                    print(f"  {index}: {host}")
+                while True:
+                    try:
+                        index = int(input("番号: ")) - 1
+                        if 0 <= index < len(hosts):
+                            args.host = hosts[index]
+                            break
+                    except ValueError:
+                        pass
         else:
             args.host = "localhost"
     if args.port is None:
-        args.port = APP_CONFIG.get("server_port", 5000)
+        args.port = int(APP_CONFIG.get("server_port", 5000))
+
+    if args.pixiv:
+        args.organize = True
+        args.recursive = True
+
     if args.mode == "server":
-        run_server(
-            args.port, args.gpu, args.model_repo, args.model_file, args.tags_file
-        )
-    else:
-        if not args.images:
-            print(
-                f"{Colors.YELLOW}[案内] 画像ファイルまたはフォルダを指定してください。{Colors.RESET}"
-            )
-            parser.print_help()
-            return
-        process_images(args)
+        run_server(args)
+        return
+    if not args.images:
+        print("[案内] 画像ファイルまたはフォルダを指定してください。")
+        create_parser().print_help()
+        return
+    process_images(args)
 
 
 if __name__ == "__main__":

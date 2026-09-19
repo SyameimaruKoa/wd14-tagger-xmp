@@ -20,7 +20,7 @@ IS_CLIENT=0
 DEBUG_MODE=0
 
 show_help() {
-    echo "WD14 Tagger Universal (日本語ヘルプ)"
+    echo "DBV4 Tagger Universal (日本語ヘルプ)"
     echo ""
     echo "使い方: ./run_tagger.sh [オプション] [パス]"
     echo ""
@@ -40,9 +40,11 @@ show_help() {
     echo "    --no-recursive      再帰検索OFF"
     echo "    --batch-size <n>    推論バッチサイズ（デフォルト: 4 / 非対応時は 1）"
     echo "    --io-workers <n>    前処理の並列ワーカー数（デフォルト: 自動）"
-    echo "    --model-repo <repo> モデル/タグのHFリポジトリID"
+    echo "    --model-profile <name> DBV4モデルプロファイル (lightweight/balanced/high/large/ultra)"
+    echo "    --model-repo <repo> DBV4モデル/タグのHFリポジトリIDを明示指定"
     echo "    --model-file <file> モデルファイル名またはパス"
     echo "    --tags-file <file>  タグCSVファイル名またはパス"
+    echo "    --thresh <0.0-1.0> DBV4のtag best_thresholdを一括上書き（省略時はタグ固有値）"
     echo "    -f, --force         既存タグがあっても強制的に再解析・上書きする"
     echo "    --sensitive-split-mode <2|4|6>"
     echo "                        Sensitive分割数 (2=2分割/4=4分割/6=6分割, デフォルト: config準拠)"
@@ -264,7 +266,7 @@ setup_env() {
 # 引数なしチェック
 if [ $# -eq 0 ]; then
     echo "=========================================="
-    echo "   WD14 Tagger Universal - Setup Mode"
+    echo "   DBV4 Tagger Universal - Setup Mode"
     echo "=========================================="
     echo "引数が指定されなかったため、環境構築のみを行います。"
     # CPUのみ作っておく（クライアントフラグ0）
@@ -287,9 +289,11 @@ while [[ $# -gt 0 ]]; do
         --no-recursive) PY_ARGS+=("--no-recursive"); shift ;;
         --batch-size) PY_ARGS+=("--batch-size" "$2"); shift 2 ;;
         --io-workers) PY_ARGS+=("--io-workers" "$2"); shift 2 ;;
+        --model-profile) PY_ARGS+=("--model-profile" "$2"); shift 2 ;;
         --model-repo) PY_ARGS+=("--model-repo" "$2"); shift 2 ;;
         --model-file) PY_ARGS+=("--model-file" "$2"); shift 2 ;;
         --tags-file) PY_ARGS+=("--tags-file" "$2"); shift 2 ;;
+        --thresh) PY_ARGS+=("--thresh" "$2"); shift 2 ;;
         -g|--gpu) USE_GPU=1; shift ;;
         --force-intel) USE_GPU=1; FORCE_TYPE="intel"; shift ;;
         --force-nvidia) USE_GPU=1; FORCE_TYPE="nvidia"; shift ;;

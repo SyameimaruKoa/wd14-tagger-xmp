@@ -1,5 +1,37 @@
 # 実装履歴
 
+## 2026-09-20
+
+- DBV4 fullモデルファミリーへの推論エンジン移行。
+  - DBV4用 Model Profile を追加し、lightweight / balanced / high / large / ultra を共通インターフェースで切り替え可能にした。
+  - 初期デフォルトを animetimm/convformer_s36.dbv4-full の balanced に設定。
+  - model.onnx / selected_tags.csv / preprocess.json / categories.json / thresholds.csv をモデルmetadataとして一体管理。
+  - selected_tags.csv の tag-specific best_threshold を標準thresholdとして使用し、--thresh は明示overrideとして分離。
+  - General / Character / Rating をmetadataから解釈し、WD14 V3の固定rating位置依存を廃止。
+  - preprocess.json に基づく PadToSize / Resize / CenterCrop / Tensor化 / ImageNet Normalize のモデル固有前処理を追加。
+  - Server / Client間で model_id / metadata_version / output_size / protocol version を検証。
+  - Client側はモデル本体をダウンロードせず、metadataのみを取得してサーバー推論結果を利用する構成に変更。
+
+- R-00 / R-15 / R-17 / R-18体系をDBV4へ接続。
+  - R-15_0〜R-15_4、R-17_0〜R-17_4 の5段階体系を維持。
+  - R-15 / R-17のseverity計算をDBV4 rating scoreへ接続。
+  - DBV4 scoreをWD14 V3 scoreと同一視せず、severity calibrationを独立レイヤーとして保持。
+
+- XMP / 再整理 / reportをDBV4対応。
+  - XMPへ dbv4_model marker と4 ratingのraw score / percentageを保存。
+  - 同一DBV4 model markerと4 raw scoreが揃っている場合、再推論せずrating再計算・整理できるよう変更。
+  - 旧WD14 scoreだけが存在する場合はDBV4推論へフォールバック。
+  - HTML reportをR-15/R-17の5段階ラベルへ対応。
+
+- Windows / Linux / Colabの実行経路をDBV4向けに更新。
+  - --model-profile をPowerShell / Bash wrapperへ追加。
+  - --thresh を明示指定した場合のみDBV4標準thresholdをoverride。
+  - ColabサーバーをDBV4サーバーへ更新。
+
+- DBV4 metadata / preprocessing / input layout / output probability変換の単体テストを追加。
+
+
+
 ## 2026-09-19
 
 - GPU/OpenVINOの内部デバッグログを通常実行時には抑制し、`run_tagger.sh --debug` 指定時のみ有効化。
